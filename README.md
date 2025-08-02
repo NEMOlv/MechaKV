@@ -1,5 +1,15 @@
-# MechaKV
+<p align="center">
+    <imgsrc="https://youke1.picui.cn/s1/2025/08/02/688de79cab230.png">
+</p>
 
+<div class="column" align="middle">
+  <a><img src="https://img.shields.io/badge/MechaKV-beta-orange" /></a>
+  <a><img src="https://img.shields.io/badge/go-v1.24.1-brightgreen" /></a>
+  <a><img src="https://img.shields.io/badge/build-passing-brightgreen" /></a>
+  <a><img src="https://img.shields.io/github/license/NEMOlv/MechaKV?color=blue" /></a>
+</div>
+
+# MechaKV
 A simple, high-performance, and easily expandable key-value database implemented in Go.
 
 ## Overview
