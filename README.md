@@ -19,15 +19,15 @@ MechaKV is a lightweight key-value storage engine designed for simplicity and ef
 ## Features
 
 - **Basic KV Operations**: Supports `Put`, `Get`, and `Delete` operations with key-value pairs.
-- **Advanced KV Operations**: Supports `BatchPut`, `BatchGet`, `BatchDelete`, `PUT_IF_NOT_EXISTS`, `PUT_IF_EXISTS`, `PUT_AND_RETURN_OLD_VALUE`, `APPEND_VALUE` and `UPDATE_TTL` operations with key-value pairs.
+- **Advanced KV Operations**: Supports `BatchPut`, `BatchGet`, `BatchDelete`, `PutIfNotExists`, `PutIfExists`, `PutAndReturnOldValue`, `AppendValue` and `UpdateTTL` operations with key-value pairs.
 - **Transaction Support**: Handles atomic transactions to ensure data consistency. Currently only supports serialization of the highest level transactions. In the future, this project plans to add Repeatable Read(RR) level transaction.
 - **Efficient Indexing**: Uses B-tree (via `github.com/google/btree`) for fast key lookup.
 - **Data Persistence**: Stores data in disk files with CRC32 verification to ensure data integrity.
 - **Background Compaction**: Automatically merges old data files to reclaim space from deleted or overwritten entries.
-- Key Expiry Mechanism:
-  - TTL Support: Allows setting time-to-live (TTL) for key-value pairs, with permanent storage as the default.
-  - Passive Expiry Check: When retrieving a key via Get, the system checks if the key has expired using the IsExpired function, which compares the key's expiry time (timestamp + TTL) with the current time. Expired keys are not returned and are removed from the index.
-  - Active Expiry Monitor: A background monitor (started via StartExpiryMonitor) periodically (every 100ms) selects random keys (up to 20 per check) from key slots, checks their expiry status, and deletes expired keys from the index to reclaim space proactively.
+- **Key Expiry Mechanism**:
+  - **TTL Support**: Allows setting time-to-live (TTL) for key-value pairs, with permanent storage as the default.
+  - **Passive Expiry Check**: When retrieving a key via Get, the system checks if the key has expired using the IsExpired function, which compares the key's expiry time (timestamp + TTL) with the current time. Expired keys are not returned and are removed from the index.
+  - **Active Expiry Monitor**: A background monitor (started via StartExpiryMonitor) periodically (every 100ms) selects random keys (up to 20 per check) from key slots, checks their expiry status, and deletes expired keys from the index to reclaim space proactively.
 
 ## Installation
 
