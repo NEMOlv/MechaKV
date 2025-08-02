@@ -288,6 +288,38 @@ err = tm.Commit(tx)
 
 The above examples demonstrate the complete workflow for core operations using the `Client` interface. All data interactions must go through the client interface to ensure transaction consistency and operational standardization.
 
+## Performance
+```bash
+goos: windows
+goarch: amd64
+pkg: MechaKV/benchmark
+cpu: AMD Ryzen 7 4800H with Radeon Graphics         
+BenchmarkPut
+BenchmarkPut-16               	  116500	      9725 ns/op	    1267 B/op	      17 allocs/op
+BenchmarkGet
+BenchmarkGet-16               	  118645	     10170 ns/op	     893 B/op	      12 allocs/op
+BenchmarkDelete
+BenchmarkDelete-16            	  163540	      7418 ns/op	     736 B/op	      12 allocs/op
+BenchmarkPutIfNotExists
+BenchmarkPutIfNotExists-16    	  155084	      7552 ns/op	     984 B/op	      13 allocs/op
+BenchmarkPutIfExists
+BenchmarkPutIfExists-16       	   60321	     19081 ns/op	    1799 B/op	      21 allocs/op
+BenchmarkPutAndGet
+BenchmarkPutAndGet-16         	  164614	      7452 ns/op	     984 B/op	      13 allocs/op
+BenchmarkUpdateTTL
+BenchmarkUpdateTTL-16         	   72324	     16872 ns/op	    1096 B/op	      18 allocs/op
+BenchmarkBatchPut
+BenchmarkBatchPut-16          	  194371	      6263 ns/op	     584 B/op	       5 allocs/op
+BenchmarkBatchGet
+BenchmarkBatchGet-16          	  122272	      9742 ns/op	     618 B/op	      12 allocs/op
+BenchmarkBatchDelete
+BenchmarkBatchDelete-16       	  192795	      6323 ns/op	     394 B/op	       6 allocs/op
+BenchmarkPutWithTTL
+BenchmarkPutWithTTL-16        	  159894	      7222 ns/op	     952 B/op	      12 allocs/op
+PASS
+```
+
+
 ## License
 
 MechaKV is licensed under the Apache License 2.0. See the [LICENSE](LICENSE) file for details.
