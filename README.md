@@ -1,5 +1,5 @@
 <p align="center">
-    <imgsrc="https://youke1.picui.cn/s1/2025/08/02/688de79cab230.png">
+    <img src="https://github.com/NEMOlv/MechaKV/blob/master/logo/MechaKV_LOGO.png" width = "50%" height = "50%">
 </p>
 
 <div class="column" align="middle">
