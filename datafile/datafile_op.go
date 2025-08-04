@@ -20,6 +20,7 @@ import (
 	. "MechaKV/comment"
 	. "MechaKV/datafile/datafile_io"
 	"fmt"
+	"github.com/valyala/bytebufferpool"
 	"hash/crc32"
 	"path/filepath"
 )
@@ -84,18 +85,18 @@ func (df *DataFile) Write(buf []byte) error {
 	return nil
 }
 
-// todo 补充一个WriteKvPaird
-func (df *DataFile) WriteKvPaird(kvPair *KvPair) error {
-	buf := kvPair.EncodeKvPair()
-	size, err := df.IOManager.Write(buf)
-	if err != nil {
-		return err
-	}
-	df.WriteOffset += int64(size)
-	return nil
-}
+//// todo 补充一个WriteKvPaird
+//func (df *DataFile) WriteKvPaird(kvPair *KvPair) error {
+//	buf := kvPair.EncodeKvPair()
+//	size, err := df.IOManager.Write(buf)
+//	if err != nil {
+//		return err
+//	}
+//	df.WriteOffset += int64(size)
+//	return nil
+//}
 
-func (df *DataFile) WriteHintKvPair(key []byte, pos *KvPairPos) error {
+func (df *DataFile) WriteHintKvPair(key []byte, pos *KvPairPos, KvPairHeader []byte, KvPairBuffer *bytebufferpool.ByteBuffer) error {
 	value := EncodeKvPairPos(pos)
 	kvPair := &KvPair{
 		Key:       key,
@@ -104,7 +105,7 @@ func (df *DataFile) WriteHintKvPair(key []byte, pos *KvPairPos) error {
 		ValueSize: uint32(len(value)),
 	}
 
-	encodeKvPair := kvPair.EncodeKvPair()
+	encodeKvPair := kvPair.EncodeKvPair(KvPairHeader, KvPairBuffer)
 
 	return df.Write(encodeKvPair)
 }
@@ -120,7 +121,7 @@ func (df *DataFile) ReadKvPair(offset int64) (*KvPair, error) {
 	}
 
 	// 首部最大大小
-	size := maxKvPairHeaderSize
+	size := MaxKvPairHeaderSize
 	// 如果offset+最大字节数超过了文件大小，则只读取到文件末尾
 	if offset+size >= filesize {
 		size = filesize - offset
@@ -168,7 +169,7 @@ func (df *DataFile) ReadKvPairPos(offset int64) (*KvPair, error) {
 	}
 
 	// 首部最大大小
-	size := maxKvPairHeaderSize
+	size := MaxKvPairHeaderSize
 	// 如果offset+最大字节数超过了文件大小，则只读取到文件末尾
 	if offset+size >= filesize {
 		size = filesize - offset

@@ -19,6 +19,7 @@ package datafile
 import (
 	. "MechaKV/comment"
 	"github.com/stretchr/testify/assert"
+	"github.com/valyala/bytebufferpool"
 	"os"
 	"strconv"
 	"testing"
@@ -46,10 +47,15 @@ func TestDataFile_WriteAndRead(t *testing.T) {
 	kvPair.ValueSize = uint32(len(testValue))
 
 	// 写入数据
-	encodeBuf := kvPair.EncodeKvPair()
-	err = dataFile.Write(encodeBuf)
+	header := make([]byte, MaxKvPairHeaderSize)
+	buffer := bytebufferpool.Get()
+	encodeKvPair := kvPair.EncodeKvPair(header, buffer)
+	err = dataFile.Write(encodeKvPair)
 	assert.Nil(t, err)
-	assert.Equal(t, int64(len(encodeBuf)), dataFile.WriteOffset)
+	assert.Equal(t, int64(len(encodeKvPair)), dataFile.WriteOffset)
+	err = dataFile.Sync()
+	assert.Nil(t, err)
+	bytebufferpool.Put(buffer)
 
 	// 读取数据
 	readKvPair, err := dataFile.ReadKvPair(0)
@@ -76,8 +82,13 @@ func TestHintFile_WriteAndRead(t *testing.T) {
 	testPos := NewKvPairPos(1, 100, 200)
 
 	// 写入hint数据
-	err = hintFile.WriteHintKvPair(testKey, &testPos)
+	header := make([]byte, MaxKvPairHeaderSize)
+	buffer := bytebufferpool.Get()
+	err = hintFile.WriteHintKvPair(testKey, &testPos, header, buffer)
 	assert.Nil(t, err)
+	err = hintFile.Sync()
+	assert.Nil(t, err)
+	bytebufferpool.Put(buffer)
 
 	// 读取hint数据
 	readKvPair, err := hintFile.ReadKvPair(0)
@@ -129,14 +140,18 @@ func TestKvPair_CRC(t *testing.T) {
 	kvPair := NewKvPair([]byte("crc_key"), []byte("crc_value"), KvPairPuted)
 	kvPair.KeySize = uint32(len(kvPair.Key))
 	kvPair.ValueSize = uint32(len(kvPair.Value))
-	encoded := kvPair.EncodeKvPair()
+	header1 := make([]byte, MaxKvPairHeaderSize)
+	buffer1 := bytebufferpool.Get()
+	encoded := kvPair.EncodeKvPair(header1, buffer1)
 	encoded[5] = encoded[5] + 1
 
 	// 正确数据
 	kvPair2 := NewKvPair([]byte("crc_key"), []byte("crc_value"), KvPairPuted)
 	kvPair2.KeySize = uint32(len(kvPair2.Key))
 	kvPair2.ValueSize = uint32(len(kvPair2.Value))
-	encoded2 := kvPair2.EncodeKvPair()
+	header2 := make([]byte, MaxKvPairHeaderSize)
+	buffer2 := bytebufferpool.Get()
+	encoded2 := kvPair2.EncodeKvPair(header2, buffer2)
 
 	// 写入数据到文件
 	// 写入错误数据
@@ -160,6 +175,9 @@ func TestKvPair_CRC(t *testing.T) {
 	// 预期会返回正确数据
 	assert.Nil(t, err)
 	assert.NotNil(t, decoded2)
+
+	bytebufferpool.Put(buffer1)
+	bytebufferpool.Put(buffer2)
 }
 
 // 测试KvPair的过期检查
@@ -239,8 +257,12 @@ func TestDataFile_BoundaryCases(t *testing.T) {
 	emptyKv := NewKvPair([]byte{}, []byte{}, KvPairPuted)
 	emptyKv.KeySize = 0
 	emptyKv.ValueSize = 0
-	encoded := emptyKv.EncodeKvPair()
+	header1 := make([]byte, MaxKvPairHeaderSize)
+	buffer1 := bytebufferpool.Get()
+	encoded := emptyKv.EncodeKvPair(header1, buffer1)
 	err = dataFile.Write(encoded)
+	assert.Nil(t, err)
+	err = dataFile.Sync()
 	assert.Nil(t, err)
 
 	readKv, err := dataFile.ReadKvPair(0)
@@ -261,13 +283,20 @@ func TestDataFile_BoundaryCases(t *testing.T) {
 	largeKv := NewKvPair(largeKey, largeValue, KvPairPuted)
 	largeKv.KeySize = uint32(len(largeKey))
 	largeKv.ValueSize = uint32(len(largeValue))
-	encoded = largeKv.EncodeKvPair()
+	header2 := make([]byte, MaxKvPairHeaderSize)
+	buffer2 := bytebufferpool.Get()
+	encoded = largeKv.EncodeKvPair(header2, buffer2)
 
 	err = dataFile.Write(encoded)
 	assert.Nil(t, err)
 
-	readKv, err = dataFile.ReadKvPair(int64(len(emptyKv.EncodeKvPair())))
+	clear(header1)
+	buffer1.Reset()
+	readKv, err = dataFile.ReadKvPair(int64(len(emptyKv.EncodeKvPair(header1, buffer1))))
 	assert.Nil(t, err)
 	assert.Equal(t, largeKey, readKv.Key)
 	assert.Equal(t, largeValue, readKv.Value)
+
+	bytebufferpool.Put(buffer1)
+	bytebufferpool.Put(buffer2)
 }

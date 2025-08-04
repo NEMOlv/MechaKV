@@ -19,6 +19,7 @@ package datafile
 import (
 	. "MechaKV/comment"
 	"encoding/binary"
+	"github.com/valyala/bytebufferpool"
 	"hash/crc32"
 	"strconv"
 	"time"
@@ -32,8 +33,6 @@ import (
 //| []byte | byte   | byte | unit64  | unit64    | uint32 | uint32   | uint32     | []byte | []byte |
 //| 4      | 1      | 1    | max(10) | max(10)   | max(5) | max(5)   | max(5)     | ksz    | vsz    |
 //+--------+--------+------+---------+-----------+--------+----------+------------+--------+--------+
-
-const maxKvPairHeaderSize int64 = 4 + 1 + 1 + binary.MaxVarintLen64*2 + binary.MaxVarintLen32*3
 
 // KvPairPos 数据内存索引，描述数据在磁盘上的位置
 type KvPairPos struct {
@@ -81,14 +80,11 @@ func NewKvPair(key []byte, value []byte, kvPairType KvPairType) KvPair {
 	}
 }
 
-func (kvPair *KvPair) EncodeKvPair() []byte {
-	// 初始化一个header部分的字节数组
-	header := make([]byte, maxKvPairHeaderSize)
-	index := 4
-
+// buf *bytebufferpool.ByteBuffer
+func (kvPair *KvPair) EncodeKvPair(header []byte, KvPairBuffer *bytebufferpool.ByteBuffer) []byte {
 	// 如果kvPair.TxFinshed == TxFinished，代表手动提交事务完成，通常
 	// 则下标为4的header字节数组存储TxFinshed，下标为4的header字节数组存储kvPairType
-	//
+	index := 4
 	if kvPair.TxFinshed == TxFinished {
 		index += binary.PutUvarint(header[index:], uint64(kvPair.TxFinshed))
 		index += binary.PutUvarint(header[index:], uint64(kvPair.Type))
@@ -105,23 +101,17 @@ func (kvPair *KvPair) EncodeKvPair() []byte {
 	index += binary.PutUvarint(header[index:], uint64(kvPair.TTL))
 	index += binary.PutUvarint(header[index:], uint64(kvPair.KeySize))
 	index += binary.PutUvarint(header[index:], uint64(kvPair.ValueSize))
-
 	kvPair.HeaderSize = uint32(index)
-	size := index + int(kvPair.KeySize) + int(kvPair.ValueSize)
 
-	// kvPairPos编码
-	encBytes := make([]byte, size)
-	// 拷贝header
-	copy(encBytes[:index], header[:index])
-	// 拷贝key和value
-	copy(encBytes[index:], kvPair.Key)
-	copy(encBytes[index+int(kvPair.KeySize):], kvPair.Value)
+	_, _ = KvPairBuffer.Write(header[:index])
+	_, _ = KvPairBuffer.Write(kvPair.Key)
+	_, _ = KvPairBuffer.Write(kvPair.Value)
 
 	// 对整个kvPairPos计算CRC
-	crc := crc32.ChecksumIEEE(encBytes[4:])
-	binary.LittleEndian.PutUint32(encBytes[:4], crc)
+	crc := crc32.ChecksumIEEE(KvPairBuffer.B[4:])
+	binary.LittleEndian.PutUint32(KvPairBuffer.B[:4], crc)
 
-	return encBytes
+	return KvPairBuffer.Bytes()
 }
 
 func (kvPair *KvPair) DecodeKvPairHeader(buf []byte) {

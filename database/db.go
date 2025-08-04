@@ -25,6 +25,7 @@ import (
 	"github.com/bwmarrin/snowflake"
 	"github.com/gofrs/flock"
 	"github.com/sigurn/crc16"
+	"github.com/valyala/bytebufferpool"
 	"io"
 	"os"
 	"path"
@@ -84,10 +85,12 @@ type DB struct {
 	isInitial bool
 	// 累计写入N字节数据
 	bytesWrite uint
-	//
+	// 过期插槽
 	KeySlots map[uint16]keyPointer
-	//
+	// ID生成器
 	TxIdGenerater *snowflake.Node
+	// 库级锁的header，之后要改成表级锁的header
+	KvPairHeader []byte
 }
 
 // getNotMergeDatafileID 获取没有进行合并的DatafileID
@@ -385,7 +388,7 @@ func (db *DB) setActiveDataFile() error {
 	return nil
 }
 
-func (db *DB) AppendKvPair(kvPair *KvPair) (*KvPairPos, error) {
+func (db *DB) AppendKvPair(kvPair *KvPair, KvPairHeader []byte, KvPairBuffer *bytebufferpool.ByteBuffer) (*KvPairPos, error) {
 	// 判断当前活跃数据文件是否存在
 	// 如果为空则初始化数据文件
 	if db.ActiveFile == nil {
@@ -395,7 +398,8 @@ func (db *DB) AppendKvPair(kvPair *KvPair) (*KvPairPos, error) {
 	}
 
 	// 对写入数据编码
-	encodeKvPair := kvPair.EncodeKvPair()
+
+	encodeKvPair := kvPair.EncodeKvPair(KvPairHeader, KvPairBuffer)
 	size := kvPair.Size()
 	// 如果写入数据已经达到活跃文件的阈值，关闭活跃文件，打开新文件
 	if db.ActiveFile.WriteOffset+int64(size) > db.Opts.DataFileSize {

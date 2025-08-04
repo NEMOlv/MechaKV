@@ -21,12 +21,16 @@ import (
 	"MechaKV/database"
 	"context"
 	cmap "github.com/orcaman/concurrent-map/v2"
+	"github.com/valyala/bytebufferpool"
 	"log"
 	"strconv"
 )
 
+type KvPairBuffers = []*bytebufferpool.ByteBuffer
+
 type TransactionManager struct {
-	db *database.DB
+	db        *database.DB
+	TxBuffers map[uint64]KvPairBuffers
 	// 可以使用一个 map 来管理所有活跃的事务
 	ActiveTxs cmap.ConcurrentMap[string, *Transaction]
 }
@@ -34,6 +38,7 @@ type TransactionManager struct {
 func NewTransactionManager(db *database.DB) *TransactionManager {
 	tm := &TransactionManager{
 		db:        db,
+		TxBuffers: make(map[uint64]KvPairBuffers, 10000),
 		ActiveTxs: cmap.New[*Transaction](),
 	}
 	return tm
@@ -149,14 +154,21 @@ func (tm *TransactionManager) Commit(tx *Transaction) (err error) {
 		if cnt == 0 {
 			pendingKvPair.TxFinshed = TxFinished
 		}
-
-		kvPairPos, err := tm.db.AppendKvPair(pendingKvPair)
+		KvPairBuffer := bytebufferpool.Get()
+		tm.TxBuffers[tx.id] = append(tm.TxBuffers[tx.id], KvPairBuffer)
+		kvPairPos, err := tm.db.AppendKvPair(pendingKvPair, tm.db.KvPairHeader, KvPairBuffer)
 		if err != nil {
 			return err
 		}
 
 		positions[key] = kvPairPos
 	}
+
+	for _, KvPairBuffer := range tm.TxBuffers[tx.id] {
+		bytebufferpool.Put(KvPairBuffer)
+	}
+	clear(tm.TxBuffers[tx.id])
+	delete(tm.TxBuffers, tx.id)
 
 	// 更新内存索引 和 KeySlots
 	for key, kvPair := range tx.pendingWrites {
@@ -196,6 +208,7 @@ func (tm *TransactionManager) Commit(tx *Transaction) (err error) {
 	}
 
 	close(tx.doneCh)
+
 	// 用于测试回滚是否正常
 	//return errors.New("test")
 	return

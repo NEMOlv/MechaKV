@@ -21,6 +21,7 @@ import (
 	"MechaKV/datafile"
 	"MechaKV/index"
 	"github.com/stretchr/testify/assert"
+	"github.com/valyala/bytebufferpool"
 	"os"
 	"strconv"
 	"strings"
@@ -209,7 +210,9 @@ func TestLoadIndexFromHintFile(t *testing.T) {
 			KeySize:   uint32(len(testKey)),
 			ValueSize: uint32(len(encodedPos)),
 		}
-		encodeKvPair := kvPair.EncodeKvPair()
+		header := make([]byte, MaxKvPairHeaderSize)
+		buffer := bytebufferpool.Get()
+		encodeKvPair := kvPair.EncodeKvPair(header, buffer)
 		if err := hintFile.Write(encodeKvPair); err != nil {
 			t.Fatalf("Failed to write to hint file: %v", err)
 		}
@@ -217,6 +220,7 @@ func TestLoadIndexFromHintFile(t *testing.T) {
 			t.Fatalf("Failed to sync to hint file: %v", err)
 		}
 		offset += int64(kvPair.Size())
+		bytebufferpool.Put(buffer)
 	}
 
 	db := &DB{
@@ -269,7 +273,9 @@ func TestLoadIndexFromDataFiles(t *testing.T) {
 			ValueSize: uint32(len(testValue)),
 			Type:      KvPairPuted,
 		}
-		encodeKvPair := kvPair.EncodeKvPair()
+		header := make([]byte, MaxKvPairHeaderSize)
+		buffer := bytebufferpool.Get()
+		encodeKvPair := kvPair.EncodeKvPair(header, buffer)
 		if err := dataFile.Write(encodeKvPair); err != nil {
 			t.Fatalf("Failed to write to hint file: %v", err)
 		}
@@ -277,6 +283,7 @@ func TestLoadIndexFromDataFiles(t *testing.T) {
 			t.Fatalf("Failed to sync to hint file: %v", err)
 		}
 		offset += int64(kvPair.Size())
+		bytebufferpool.Put(buffer)
 	}
 
 	db := &DB{
@@ -338,8 +345,9 @@ func TestAppendKvPair(t *testing.T) {
 			DirPath:      dir,
 			DataFileSize: 1024,
 		},
-		Index:    index.NewBTree(),
-		KeySlots: make(map[uint16]keyPointer),
+		Index:        index.NewBTree(),
+		KeySlots:     make(map[uint16]keyPointer),
+		KvPairHeader: make([]byte, MaxKvPairHeaderSize),
 	}
 
 	testKey := []byte("test_key")
@@ -352,11 +360,13 @@ func TestAppendKvPair(t *testing.T) {
 		Type:      KvPairPuted,
 	}
 
-	pos, err := db.AppendKvPair(kvPair)
+	buffer := bytebufferpool.Get()
+	pos, err := db.AppendKvPair(kvPair, db.KvPairHeader, buffer)
 	if err != nil {
 		t.Fatalf("AppendKvPair returned an error: %v", err)
 	}
 	assert.NotNil(t, pos, "AppendKvPair should return a valid position")
+	bytebufferpool.Put(buffer)
 }
 
 // TestGetValueByPosition 测试 GetValueByPosition 函数
@@ -385,10 +395,16 @@ func TestGetValueByPosition(t *testing.T) {
 		ValueSize: uint32(len(testValue)),
 		Type:      KvPairPuted,
 	}
-	encodeKvPair := kvPair.EncodeKvPair()
+	header := make([]byte, MaxKvPairHeaderSize)
+	buffer := bytebufferpool.Get()
+	encodeKvPair := kvPair.EncodeKvPair(header, buffer)
 	if err := testDataFile.Write(encodeKvPair); err != nil {
 		t.Fatalf("Failed to write to test data file: %v", err)
 	}
+	if err := testDataFile.Sync(); err != nil {
+		t.Fatalf("Failed to sync to test data file: %v", err)
+	}
+	bytebufferpool.Put(buffer)
 
 	db := &DB{
 		Opts: Options{
@@ -406,6 +422,7 @@ func TestGetValueByPosition(t *testing.T) {
 		t.Fatalf("GetValueByPosition returned an error: %v", err)
 	}
 	assert.Equal(t, testValue, value, "GetValueByPosition should return the correct value")
+
 }
 
 // TestGetKvPairByPosition 测试 GetKvPairByPosition 函数
@@ -434,10 +451,19 @@ func TestGetKvPairByPosition(t *testing.T) {
 		ValueSize: uint32(len(testValue)),
 		Type:      KvPairPuted,
 	}
-	encodeKvPair := kvPair.EncodeKvPair()
+
+	header := make([]byte, MaxKvPairHeaderSize)
+	buffer := bytebufferpool.Get()
+	encodeKvPair := kvPair.EncodeKvPair(header, buffer)
+
 	if err := testDataFile.Write(encodeKvPair); err != nil {
 		t.Fatalf("Failed to write to test data file: %v", err)
 	}
+	if err := testDataFile.Sync(); err != nil {
+		t.Fatalf("Failed to sync to test data file: %v", err)
+	}
+
+	bytebufferpool.Put(buffer)
 
 	db := &DB{
 		Opts: Options{

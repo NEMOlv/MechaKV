@@ -25,6 +25,7 @@ import (
 	"github.com/bwmarrin/snowflake"
 	"github.com/gofrs/flock"
 	"github.com/robfig/cron/v3"
+	"github.com/valyala/bytebufferpool"
 	"io"
 	"os"
 	"path/filepath"
@@ -89,6 +90,7 @@ func Open(options Options) (*DB, error) {
 		mergeManager:  mergeManager,
 		expiryMonitor: expiryMonitor,
 		TxIdGenerater: TxIdGenerater,
+		KvPairHeader:  make([]byte, MaxKvPairHeaderSize),
 	}
 
 	// 加载merge目录中的数据文件
@@ -297,6 +299,8 @@ func (db *DB) merge() error {
 	if err != nil {
 		return err
 	}
+	var KvPairHeader []byte
+	var KvPairBuffers []*bytebufferpool.ByteBuffer
 
 	// 遍历处理每个数据文件
 	for _, dataFile := range mergeFiles {
@@ -323,19 +327,24 @@ func (db *DB) merge() error {
 				kvPairPos.Fid == dataFile.FileID &&
 				kvPairPos.Offset == offset {
 				// 清除事务标记
-
-				kvPairPos, err = mergeDB.AppendKvPair(kvPair)
+				KvPairBuffer := bytebufferpool.Get()
+				KvPairBuffers = append(KvPairBuffers, KvPairBuffer)
+				kvPairPos, err = mergeDB.AppendKvPair(kvPair, KvPairHeader, KvPairBuffer)
 				if err != nil {
 					return err
 				}
-
+				KvPairBuffer.Reset()
 				// 将当前位置索引写道 Hint 文件中
-				if err = hintFile.WriteHintKvPair(kvPair.Key, kvPairPos); err != nil {
+				if err = hintFile.WriteHintKvPair(kvPair.Key, kvPairPos, KvPairHeader, KvPairBuffer); err != nil {
 					return err
 				}
 			}
 			offset += int64(size)
 		}
+		for _, KvPairBuffer := range KvPairBuffers {
+			bytebufferpool.Put(KvPairBuffer)
+		}
+		clear(KvPairBuffers)
 	}
 
 	// Sync 保持持久化

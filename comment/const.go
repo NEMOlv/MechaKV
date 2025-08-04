@@ -16,6 +16,10 @@ limitations under the License.
 
 package comment
 
+import "encoding/binary"
+
+const MaxKvPairHeaderSize int64 = 4 + 1 + 1 + binary.MaxVarintLen64*2 + binary.MaxVarintLen32*3
+
 const (
 	MergeDirName     = "-merge"
 	MergeFinishedKey = "merge-finished"
