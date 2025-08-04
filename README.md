@@ -1,5 +1,5 @@
 <p align="center">
-    <imgsrc="https://youke1.picui.cn/s1/2025/08/02/688de79cab230.png">
+    <img src="https://github.com/NEMOlv/MechaKV/blob/master/logo/MechaKV_LOGO.png" width = "70%" height = "70%">
 </p>
 
 <div class="column" align="middle">
@@ -19,15 +19,15 @@ MechaKV is a lightweight key-value storage engine designed for simplicity and ef
 ## Features
 
 - **Basic KV Operations**: Supports `Put`, `Get`, and `Delete` operations with key-value pairs.
-- **Advanced KV Operations**: Supports `BatchPut`, `BatchGet`, `BatchDelete`, `PUT_IF_NOT_EXISTS`, `PUT_IF_EXISTS`, `PUT_AND_RETURN_OLD_VALUE`, `APPEND_VALUE` and `UPDATE_TTL` operations with key-value pairs.
+- **Advanced KV Operations**: Supports `BatchPut`, `BatchGet`, `BatchDelete`, `PutIfNotExists`, `PutIfExists`, `PutAndReturnOldValue`, `AppendValue` and `UpdateTTL` operations with key-value pairs.
 - **Transaction Support**: Handles atomic transactions to ensure data consistency. Currently only supports serialization of the highest level transactions. In the future, this project plans to add Repeatable Read(RR) level transaction.
 - **Efficient Indexing**: Uses B-tree (via `github.com/google/btree`) for fast key lookup.
 - **Data Persistence**: Stores data in disk files with CRC32 verification to ensure data integrity.
 - **Background Compaction**: Automatically merges old data files to reclaim space from deleted or overwritten entries.
-- Key Expiry Mechanism:
-  - TTL Support: Allows setting time-to-live (TTL) for key-value pairs, with permanent storage as the default.
-  - Passive Expiry Check: When retrieving a key via Get, the system checks if the key has expired using the IsExpired function, which compares the key's expiry time (timestamp + TTL) with the current time. Expired keys are not returned and are removed from the index.
-  - Active Expiry Monitor: A background monitor (started via StartExpiryMonitor) periodically (every 100ms) selects random keys (up to 20 per check) from key slots, checks their expiry status, and deletes expired keys from the index to reclaim space proactively.
+- **Key Expiry Mechanism**:
+  - **TTL Support**: Allows setting time-to-live (TTL) for key-value pairs, with permanent storage as the default.
+  - **Passive Expiry Check**: When retrieving a key via Get, the system checks if the key has expired using the IsExpired function, which compares the key's expiry time (timestamp + TTL) with the current time. Expired keys are not returned and are removed from the index.
+  - **Active Expiry Monitor**: A background monitor (started via StartExpiryMonitor) periodically (every 100ms) selects random keys (up to 20 per check) from key slots, checks their expiry status, and deletes expired keys from the index to reclaim space proactively.
 
 ## Installation
 
@@ -287,6 +287,38 @@ err = tm.Commit(tx)
 - **Isolation**: Transactions see their own uncommitted changes (read-your-own-writes) but not changes from other concurrent transactions.
 
 The above examples demonstrate the complete workflow for core operations using the `Client` interface. All data interactions must go through the client interface to ensure transaction consistency and operational standardization.
+
+## Performance
+```bash
+goos: windows
+goarch: amd64
+pkg: MechaKV/benchmark
+cpu: AMD Ryzen 7 4800H with Radeon Graphics         
+BenchmarkPut
+BenchmarkPut-16               	  116500	      9725 ns/op	    1267 B/op	      17 allocs/op
+BenchmarkGet
+BenchmarkGet-16               	  118645	     10170 ns/op	     893 B/op	      12 allocs/op
+BenchmarkDelete
+BenchmarkDelete-16            	  163540	      7418 ns/op	     736 B/op	      12 allocs/op
+BenchmarkPutIfNotExists
+BenchmarkPutIfNotExists-16    	  155084	      7552 ns/op	     984 B/op	      13 allocs/op
+BenchmarkPutIfExists
+BenchmarkPutIfExists-16       	   60321	     19081 ns/op	    1799 B/op	      21 allocs/op
+BenchmarkPutAndGet
+BenchmarkPutAndGet-16         	  164614	      7452 ns/op	     984 B/op	      13 allocs/op
+BenchmarkUpdateTTL
+BenchmarkUpdateTTL-16         	   72324	     16872 ns/op	    1096 B/op	      18 allocs/op
+BenchmarkBatchPut
+BenchmarkBatchPut-16          	  194371	      6263 ns/op	     584 B/op	       5 allocs/op
+BenchmarkBatchGet
+BenchmarkBatchGet-16          	  122272	      9742 ns/op	     618 B/op	      12 allocs/op
+BenchmarkBatchDelete
+BenchmarkBatchDelete-16       	  192795	      6323 ns/op	     394 B/op	       6 allocs/op
+BenchmarkPutWithTTL
+BenchmarkPutWithTTL-16        	  159894	      7222 ns/op	     952 B/op	      12 allocs/op
+PASS
+```
+
 
 ## License
 
