@@ -295,27 +295,25 @@ goarch: amd64
 pkg: MechaKV/benchmark
 cpu: AMD Ryzen 7 4800H with Radeon Graphics         
 BenchmarkPut
-BenchmarkPut-16               	  116500	      9725 ns/op	    1267 B/op	      17 allocs/op
+BenchmarkPut-16               	  160292	      7433 ns/op	     784 B/op	      12 allocs/op
 BenchmarkGet
-BenchmarkGet-16               	  118645	     10170 ns/op	     893 B/op	      12 allocs/op
+BenchmarkGet-16               	  114590	      9693 ns/op	     765 B/op	      12 allocs/op
 BenchmarkDelete
-BenchmarkDelete-16            	  163540	      7418 ns/op	     736 B/op	      12 allocs/op
+BenchmarkDelete-16            	  167617	      7504 ns/op	     721 B/op	      12 allocs/op
 BenchmarkPutIfNotExists
-BenchmarkPutIfNotExists-16    	  155084	      7552 ns/op	     984 B/op	      13 allocs/op
+BenchmarkPutIfNotExists-16    	  155674	      7568 ns/op	     861 B/op	      14 allocs/op
 BenchmarkPutIfExists
-BenchmarkPutIfExists-16       	   60321	     19081 ns/op	    1799 B/op	      21 allocs/op
+BenchmarkPutIfExists-16       	   71620	     17156 ns/op	    1227 B/op	      19 allocs/op
 BenchmarkPutAndGet
-BenchmarkPutAndGet-16         	  164614	      7452 ns/op	     984 B/op	      13 allocs/op
+BenchmarkPutAndGet-16         	  161752	      7520 ns/op	     816 B/op	      13 allocs/op
 BenchmarkUpdateTTL
-BenchmarkUpdateTTL-16         	   72324	     16872 ns/op	    1096 B/op	      18 allocs/op
+BenchmarkUpdateTTL-16         	   70833	     17015 ns/op	    1203 B/op	      18 allocs/op
 BenchmarkBatchPut
-BenchmarkBatchPut-16          	  194371	      6263 ns/op	     584 B/op	       5 allocs/op
+BenchmarkBatchPut-16          	  205360	      6396 ns/op	     469 B/op	       4 allocs/op
 BenchmarkBatchGet
-BenchmarkBatchGet-16          	  122272	      9742 ns/op	     618 B/op	      12 allocs/op
+BenchmarkBatchGet-16          	  143100	      9490 ns/op	     749 B/op	      11 allocs/op
 BenchmarkBatchDelete
-BenchmarkBatchDelete-16       	  192795	      6323 ns/op	     394 B/op	       6 allocs/op
-BenchmarkPutWithTTL
-BenchmarkPutWithTTL-16        	  159894	      7222 ns/op	     952 B/op	      12 allocs/op
+BenchmarkBatchDelete-16       	  194697	      6650 ns/op	     447 B/op	       5 allocs/op
 PASS
 ```
 

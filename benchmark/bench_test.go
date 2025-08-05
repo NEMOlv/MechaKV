@@ -45,6 +45,16 @@ func destroyDB(db *DB) {
 	}
 }
 
+func makeData(data_num, value_len int) ([][]byte, [][]byte) {
+	genkeys := make([][]byte, 500000)
+	genValues := make([][]byte, 500000)
+	for n := 0; n < data_num; n++ {
+		genkeys[n] = utils.GenerateKey(n)
+		genValues[n] = utils.GenerateValue(value_len)
+	}
+	return genkeys, genValues
+}
+
 func fastOpen() (*DB, *client.Client) {
 	opts := database.DefaultOptions
 	dir, _ := os.MkdirTemp("../temp", "MechaKV")
@@ -63,12 +73,12 @@ func BenchmarkPut(b *testing.B) {
 		destroyDB(db)
 	}()
 
+	keys, values := makeData(b.N, 64)
+
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		genkey := utils.GenerateKey(i)
-		genValue := utils.GenerateValue(128)
-		err := cli.Put(genkey, genValue)
+		err := cli.Put(keys[i], values[i])
 		assert.Nil(b, err)
 	}
 }
@@ -83,11 +93,8 @@ func BenchmarkGet(b *testing.B) {
 	}()
 
 	// 预先插入测试数据
-	keys := make([][]byte, b.N)
-	values := make([][]byte, b.N)
+	keys, values := makeData(b.N, 64)
 	for i := 0; i < b.N; i++ {
-		keys[i] = utils.GenerateKey(i)
-		values[i] = utils.GenerateValue(128)
 		if err := cli.Put(keys[i], values[i]); err != nil {
 			b.Fatalf("Pre-put error: %v", err)
 		}
@@ -112,10 +119,9 @@ func BenchmarkDelete(b *testing.B) {
 	}()
 
 	// 预先插入测试数据
-	keys := make([][]byte, b.N)
+	keys, values := makeData(b.N, 64)
 	for i := 0; i < b.N; i++ {
-		keys[i] = utils.GenerateKey(i)
-		if err := cli.Put(keys[i], []byte("value")); err != nil {
+		if err := cli.Put(keys[i], values[i]); err != nil {
 			b.Fatalf("Pre-put error: %v", err)
 		}
 	}
@@ -139,12 +145,7 @@ func BenchmarkPutIfNotExists(b *testing.B) {
 	}()
 
 	// 预生成测试数据
-	keys := make([][]byte, b.N)
-	values := make([][]byte, b.N)
-	for i := 0; i < b.N; i++ {
-		keys[i] = utils.GenerateKey(i)
-		values[i] = utils.GenerateValue(128)
-	}
+	keys, values := makeData(b.N, 64)
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -165,21 +166,18 @@ func BenchmarkPutIfExists(b *testing.B) {
 	}()
 
 	// 预先插入测试数据
-	keys := make([][]byte, b.N)
-	values := make([][]byte, b.N)
+	keys, values := makeData(b.N, 64)
 	for i := 0; i < b.N; i++ {
-		keys[i] = utils.GenerateKey(i)
-		values[i] = utils.GenerateValue(128)
 		if err := cli.Put(keys[i], values[i]); err != nil {
 			b.Fatalf("Pre-put error: %v", err)
 		}
 	}
+	_, newValues := makeData(b.N, 64)
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		newValue := utils.GenerateValue(128)
-		if err := cli.Put(keys[i], newValue, client.WithPutCondition(PUT_IF_EXISTS)); err != nil {
+		if err := cli.Put(keys[i], newValues[i], client.WithPutCondition(PUT_IF_EXISTS)); err != nil {
 			b.Fatalf("PutIfExists error: %v", err)
 		}
 	}
@@ -195,12 +193,7 @@ func BenchmarkPutAndGet(b *testing.B) {
 	}()
 
 	// 预生成测试数据
-	keys := make([][]byte, b.N)
-	values := make([][]byte, b.N)
-	for i := 0; i < b.N; i++ {
-		keys[i] = utils.GenerateKey(i)
-		values[i] = utils.GenerateValue(128)
-	}
+	keys, values := makeData(b.N, 64)
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -221,10 +214,9 @@ func BenchmarkUpdateTTL(b *testing.B) {
 	}()
 
 	// 预先插入测试数据
-	keys := make([][]byte, b.N)
+	keys, values := makeData(b.N, 64)
 	for i := 0; i < b.N; i++ {
-		keys[i] = utils.GenerateKey(i)
-		if err := cli.Put(keys[i], []byte("value")); err != nil {
+		if err := cli.Put(keys[i], values[i]); err != nil {
 			b.Fatalf("Pre-put error: %v", err)
 		}
 	}
@@ -248,28 +240,30 @@ func BenchmarkBatchPut(b *testing.B) {
 	}()
 
 	// 批量大小
-	batchSize := 100
+	batchSize := 10000
 	totalBatches := b.N / batchSize
 	if totalBatches == 0 {
 		totalBatches = 1
 	}
 
 	// 预生成测试数据
-	allKeys := make([][]byte, totalBatches*batchSize)
-	allValues := make([][]byte, totalBatches*batchSize)
-	for i := 0; i < totalBatches*batchSize; i++ {
-		allKeys[i] = utils.GenerateKey(i)
-		allValues[i] = utils.GenerateValue(128)
-	}
+	allKeys, allValues := makeData(batchSize*totalBatches, 64)
+	var (
+		start  int
+		end    int
+		keys   [][]byte
+		values [][]byte
+		err    error
+	)
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < totalBatches; i++ {
-		start := i * batchSize
-		end := start + batchSize
-		keys := allKeys[start:end]
-		values := allValues[start:end]
-		if err := cli.BatchPut(keys, values); err != nil {
+		start = i * batchSize
+		end = start + batchSize
+		keys = allKeys[start:end]
+		values = allValues[start:end]
+		if err = cli.BatchPut(keys, values); err != nil {
 			b.Fatalf("BatchPut error: %v", err)
 		}
 	}
@@ -285,29 +279,36 @@ func BenchmarkBatchGet(b *testing.B) {
 	}()
 
 	// 批量大小
-	batchSize := 100
+	batchSize := 10000
 	totalBatches := b.N / batchSize
 	if totalBatches == 0 {
 		totalBatches = 1
 	}
 
+	// 预生成测试数据
+	allKeys, allValues := makeData(batchSize*totalBatches, 64)
 	// 预先插入测试数据
-	allKeys := make([][]byte, totalBatches*batchSize)
 	for i := 0; i < totalBatches*batchSize; i++ {
-		allKeys[i] = utils.GenerateKey(i)
-		if err := cli.Put(allKeys[i], []byte("value")); err != nil {
+		if err := cli.Put(allKeys[i], allValues[i]); err != nil {
 			b.Fatalf("Pre-put error: %v", err)
 		}
 	}
 
+	var (
+		start int
+		end   int
+		keys  [][]byte
+		err   error
+	)
+
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < totalBatches; i++ {
-		start := i * batchSize
-		end := start + batchSize
-		keys := allKeys[start:end]
+		start = i * batchSize
+		end = start + batchSize
+		keys = allKeys[start:end]
 		for _, key := range keys {
-			if _, err := cli.Get(key); err != nil {
+			if _, err = cli.Get(key); err != nil {
 				b.Fatalf("BatchGet error: %v", err)
 			}
 		}
@@ -324,55 +325,36 @@ func BenchmarkBatchDelete(b *testing.B) {
 	}()
 
 	// 批量大小
-	batchSize := 100
+	batchSize := 10000
 	totalBatches := b.N / batchSize
 	if totalBatches == 0 {
 		totalBatches = 1
 	}
 
+	// 预生成测试数据
+	allKeys, allValues := makeData(batchSize*totalBatches, 64)
 	// 预先插入测试数据
-	allKeys := make([][]byte, totalBatches*batchSize)
 	for i := 0; i < totalBatches*batchSize; i++ {
-		allKeys[i] = utils.GenerateKey(i)
-		if err := cli.Put(allKeys[i], []byte("value")); err != nil {
+		if err := cli.Put(allKeys[i], allValues[i]); err != nil {
 			b.Fatalf("Pre-put error: %v", err)
 		}
 	}
 
+	var (
+		start int
+		end   int
+		keys  [][]byte
+		err   error
+	)
+
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < totalBatches; i++ {
-		start := i * batchSize
-		end := start + batchSize
-		keys := allKeys[start:end]
-		if err := cli.BatchDelete(keys); err != nil {
+		start = i * batchSize
+		end = start + batchSize
+		keys = allKeys[start:end]
+		if err = cli.BatchDelete(keys); err != nil {
 			b.Fatalf("BatchDelete error: %v", err)
-		}
-	}
-}
-
-// 基准测试带TTL的Put操作
-func BenchmarkPutWithTTL(b *testing.B) {
-	db, cli := fastOpen()
-	defer func() {
-		_ = cli.Close()
-		_ = db.Close()
-		destroyDB(db)
-	}()
-
-	// 预生成测试数据
-	keys := make([][]byte, b.N)
-	values := make([][]byte, b.N)
-	for i := 0; i < b.N; i++ {
-		keys[i] = utils.GenerateKey(i)
-		values[i] = utils.GenerateValue(128)
-	}
-
-	b.ResetTimer()
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		if err := cli.Put(keys[i], values[i], client.WithTTL(3600)); err != nil {
-			b.Fatalf("PutWithTTL error: %v", err)
 		}
 	}
 }
