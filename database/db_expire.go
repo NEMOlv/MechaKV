@@ -95,7 +95,7 @@ func (db *DB) randomSelectKeys(keyNums int) ([][]byte, uint16) {
 		}
 
 		for i := range keyNums {
-			randKeys = append(randKeys, *randSlot[i])
+			randKeys = append(randKeys, randSlot[i])
 		}
 		return randKeys, slotNum
 	}
@@ -126,7 +126,7 @@ func (db *DB) checkAndDeleteExpiredKey(keys [][]byte, slotNum uint16) (err error
 		if kvPair.IsExpired() {
 			db.Index.Delete(key)
 			for idx, deleteKey := range db.KeySlots[slotNum] {
-				if bytes.Equal(kvPair.Key, *deleteKey) {
+				if bytes.Equal(kvPair.Key, deleteKey) {
 					db.KeySlots[slotNum] = append(db.KeySlots[slotNum][:idx], db.KeySlots[slotNum][idx+1:]...)
 					break
 				}

@@ -63,16 +63,11 @@ func (tx *Transaction) put(key, value []byte, ttl uint32, timestamp uint64) erro
 		return ErrKeyIsEmpty
 	}
 
-	kvPair := &KvPair{
-		Type:      KvPairPuted,
-		TxId:      tx.id,
-		Timestamp: timestamp,
-		TTL:       ttl,
-		KeySize:   uint32(len(key)),
-		ValueSize: uint32(len(value)),
-		Key:       key,
-		Value:     value,
-	}
+	kvPair := tx.tm.KvPairPool.Get().(*KvPair)
+	kvPair.TxId, kvPair.Type = tx.id, KvPairPuted
+	kvPair.Key, kvPair.Value = key, value
+	kvPair.KeySize, kvPair.ValueSize = uint32(len(key)), uint32(len(value))
+	kvPair.Timestamp, kvPair.TTL = timestamp, ttl
 
 	tx.pendingWrites[string(key)] = kvPair
 	return nil

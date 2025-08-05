@@ -40,7 +40,7 @@ import (
 )
 
 type (
-	keyPointer []*[]byte
+	keyPointer [][]byte
 	KvPair     = datafile.KvPair
 	KvPairPos  = datafile.KvPairPos
 	DataFile   = datafile.DataFile
@@ -444,10 +444,10 @@ func (db *DB) AppendKvPair(kvPair *KvPair, KvPairHeader []byte, KvPairBuffer *by
 	keyCrc := crc16.Checksum(kvPair.Key, table)
 	slot := keyCrc % 16384
 	if kvPair.Type == KvPairPuted {
-		db.KeySlots[slot] = append(db.KeySlots[slot], &kvPair.Key)
+		db.KeySlots[slot] = append(db.KeySlots[slot], kvPair.Key)
 	} else if kvPair.Type == KvPairDeleted {
 		for idx, deleteKey := range db.KeySlots[slot] {
-			if bytes.Equal(kvPair.Key, *deleteKey) {
+			if bytes.Equal(kvPair.Key, deleteKey) {
 				db.KeySlots[slot] = append(db.KeySlots[slot][:idx], db.KeySlots[slot][idx+1:]...)
 				break
 			}

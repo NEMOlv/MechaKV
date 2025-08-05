@@ -295,25 +295,25 @@ goarch: amd64
 pkg: MechaKV/benchmark
 cpu: AMD Ryzen 7 4800H with Radeon Graphics         
 BenchmarkPut
-BenchmarkPut-16               	  160292	      7433 ns/op	     784 B/op	      12 allocs/op
+BenchmarkPut-16               	  165394	      6964 ns/op	     730 B/op	      11 allocs/op
 BenchmarkGet
-BenchmarkGet-16               	  114590	      9693 ns/op	     765 B/op	      12 allocs/op
+BenchmarkGet-16               	  124113	      9979 ns/op	     766 B/op	      12 allocs/op
 BenchmarkDelete
-BenchmarkDelete-16            	  167617	      7504 ns/op	     721 B/op	      12 allocs/op
+BenchmarkDelete-16            	  172972	      7160 ns/op	     745 B/op	      12 allocs/op
 BenchmarkPutIfNotExists
-BenchmarkPutIfNotExists-16    	  155674	      7568 ns/op	     861 B/op	      14 allocs/op
+BenchmarkPutIfNotExists-16    	  156226	      7177 ns/op	     806 B/op	      13 allocs/op
 BenchmarkPutIfExists
-BenchmarkPutIfExists-16       	   71620	     17156 ns/op	    1227 B/op	      19 allocs/op
+BenchmarkPutIfExists-16       	   71877	     16985 ns/op	    1173 B/op	      18 allocs/op
 BenchmarkPutAndGet
-BenchmarkPutAndGet-16         	  161752	      7520 ns/op	     816 B/op	      13 allocs/op
+BenchmarkPutAndGet-16         	  165006	      7116 ns/op	     762 B/op	      12 allocs/op
 BenchmarkUpdateTTL
-BenchmarkUpdateTTL-16         	   70833	     17015 ns/op	    1203 B/op	      18 allocs/op
+BenchmarkUpdateTTL-16         	   72751	     16504 ns/op	    1149 B/op	      17 allocs/op
 BenchmarkBatchPut
-BenchmarkBatchPut-16          	  205360	      6396 ns/op	     469 B/op	       4 allocs/op
+BenchmarkBatchPut-16          	  208562	      6024 ns/op	     429 B/op	       3 allocs/op
 BenchmarkBatchGet
-BenchmarkBatchGet-16          	  143100	      9490 ns/op	     749 B/op	      11 allocs/op
+BenchmarkBatchGet-16          	  228930	      9456 ns/op	     735 B/op	      11 allocs/op
 BenchmarkBatchDelete
-BenchmarkBatchDelete-16       	  194697	      6650 ns/op	     447 B/op	       5 allocs/op
+BenchmarkBatchDelete-16       	  199519	      6290 ns/op	     461 B/op	       4 allocs/op
 PASS
 ```
 

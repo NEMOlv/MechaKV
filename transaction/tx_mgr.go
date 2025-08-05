@@ -24,22 +24,25 @@ import (
 	"github.com/valyala/bytebufferpool"
 	"log"
 	"strconv"
+	"sync"
 )
 
 type KvPairBuffers = []*bytebufferpool.ByteBuffer
 
 type TransactionManager struct {
-	db        *database.DB
-	TxBuffers map[uint64]KvPairBuffers
+	db         *database.DB
+	KvPairPool sync.Pool
+	TxBuffers  map[uint64]KvPairBuffers
 	// 可以使用一个 map 来管理所有活跃的事务
 	ActiveTxs cmap.ConcurrentMap[string, *Transaction]
 }
 
 func NewTransactionManager(db *database.DB) *TransactionManager {
 	tm := &TransactionManager{
-		db:        db,
-		TxBuffers: make(map[uint64]KvPairBuffers, 10000),
-		ActiveTxs: cmap.New[*Transaction](),
+		db:         db,
+		KvPairPool: sync.Pool{New: func() interface{} { return &KvPair{} }},
+		TxBuffers:  make(map[uint64]KvPairBuffers, 10000),
+		ActiveTxs:  cmap.New[*Transaction](),
 	}
 	return tm
 }
@@ -110,13 +113,16 @@ func (tm *TransactionManager) Begin(isWrite, isAutoCommit bool, options *TxOptio
 func (tm *TransactionManager) Commit(tx *Transaction) (err error) {
 	// 事务管理器加锁，避免提交事务时，pendingWrites被修改
 	defer func() {
-		tm.unlock(tx.isWrite)
 		// 事务无论是否提交成功，都需要进行后清理
 		// 待写数组置空
+		for _, kvPair := range tx.pendingWrites {
+			tm.KvPairPool.Put(kvPair)
+		}
 		tx.pendingWrites = nil
 		// 从事务map中删除执行完毕的事务
 		tm.ActiveTxs.Remove(strconv.FormatUint(tx.id, 10))
 		tx.setStatusClosed()
+		tm.unlock(tx.isWrite)
 	}()
 
 	// 如果事务已经关闭，返回无法提交已关闭事务的错误
@@ -186,20 +192,6 @@ func (tm *TransactionManager) Commit(tx *Transaction) (err error) {
 		}
 	}
 
-	// 如果最后写入标识事务完成的数据失败或持久化失败，则删除内存中的相关数据
-	// 由于没有写入完成标识，因此在重启、合并时，该部分数据不会被识别
-	defer func() {
-		if err != nil {
-			for _, kvPair := range tx.pendingWrites {
-				if kvPair.Type == KvPairPuted {
-					tm.db.Index.Delete(kvPair.Key)
-				} else if kvPair.Type == KvPairDeleted {
-					continue
-				}
-			}
-		}
-	}()
-
 	// 根据配置决定是否持久化
 	if tx.options.SyncWrites && tm.db.ActiveFile != nil {
 		if err = tm.db.ActiveFile.Sync(); err != nil {
@@ -208,9 +200,6 @@ func (tm *TransactionManager) Commit(tx *Transaction) (err error) {
 	}
 
 	close(tx.doneCh)
-
-	// 用于测试回滚是否正常
-	//return errors.New("test")
 	return
 }
 
