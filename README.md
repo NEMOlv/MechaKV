@@ -317,13 +317,17 @@ BenchmarkBatchDelete-16       	  199519	      6290 ns/op	     461 B/op	       4 
 PASS
 ```
 
+## Contributors
+Thank you for considering contributing to MechaKV!
 
-## License
-
-MechaKV is licensed under the Apache License 2.0. See the [LICENSE](LICENSE) file for details.
+<a href="https://github.com/NEMOlv/MechaKV/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=NEMOlv/MechaKV" />
+</a>
 
 ## Acknowledgments
-
 - Uses `github.com/google/btree` for B-tree implementation.
 - Uses `github.com/stretchr/testify` for unit testing.
 - Inspired by bitcask model, RoesDB, NutsDB and other log-structured storage engines.
+
+## License
+MechaKV is licensed under the Apache License 2.0. See the [LICENSE](LICENSE) file for details.
