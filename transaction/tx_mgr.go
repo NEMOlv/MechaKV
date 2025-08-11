@@ -32,6 +32,7 @@ type KvPairBuffers = []*bytebufferpool.ByteBuffer
 type TransactionManager struct {
 	db         *database.DB
 	KvPairPool sync.Pool
+	TxPool     sync.Pool
 	TxBuffers  map[uint64]KvPairBuffers
 	// 可以使用一个 map 来管理所有活跃的事务
 	ActiveTxs cmap.ConcurrentMap[string, *Transaction]
@@ -41,6 +42,7 @@ func NewTransactionManager(db *database.DB) *TransactionManager {
 	tm := &TransactionManager{
 		db:         db,
 		KvPairPool: sync.Pool{New: func() interface{} { return &KvPair{} }},
+		TxPool:     sync.Pool{New: func() interface{} { return &Transaction{} }},
 		TxBuffers:  make(map[uint64]KvPairBuffers, 10000),
 		ActiveTxs:  cmap.New[*Transaction](),
 	}
@@ -67,15 +69,17 @@ func (tm *TransactionManager) Begin(isWrite, isAutoCommit bool, options *TxOptio
 		// 返回nil,数据库关闭错
 		return nil, ErrDBClosed
 	}
-
-	tx := &Transaction{
-		tm:            tm,
-		pendingWrites: make(map[string]*KvPair),
-		isWrite:       isWrite,
-		isAutoCommit:  isAutoCommit,
-		options:       options,
-		doneCh:        make(chan struct{}), // 初始化退出通知channel
-	}
+	tx := tm.TxPool.Get().(*Transaction)
+	// 传入事务管理器
+	tx.tm = tm
+	// 初始化待写数组
+	tx.pendingWrites = make(map[string]*KvPair)
+	// 配置当前事务是否为写事务和自动提交
+	tx.isWrite, tx.isAutoCommit = isWrite, isAutoCommit
+	// 配置事务的配置项
+	tx.options = options
+	// 初始化退出通知channel
+	tx.doneCh = make(chan struct{})
 	tm.lock(isWrite)
 	// 雪花算法生成事务ID
 	tx.id = uint64(tm.db.TxIdGenerater.Generate())
@@ -123,6 +127,7 @@ func (tm *TransactionManager) Commit(tx *Transaction) (err error) {
 		tm.ActiveTxs.Remove(strconv.FormatUint(tx.id, 10))
 		tx.setStatusClosed()
 		tm.unlock(tx.isWrite)
+		tm.TxPool.Put(tx)
 	}()
 
 	// 如果事务已经关闭，返回无法提交已关闭事务的错误
@@ -207,10 +212,14 @@ func (tm *TransactionManager) Commit(tx *Transaction) (err error) {
 func (tm *TransactionManager) Rollback(tx *Transaction) error {
 	defer func() {
 		if tx.status.Load().(TransactionStatus) == TransactionRunning {
+			// 将事务状态修改为关闭
+			tx.setStatusClosed()
 			tm.unlock(tx.isWrite)
+		} else {
+			// 将事务状态修改为关闭
+			tx.setStatusClosed()
 		}
-		// 将事务状态修改为关闭
-		tx.setStatusClosed()
+		tm.TxPool.Put(tx)
 	}()
 
 	// 如果数据库实例为空，则返回ErrDBClosed

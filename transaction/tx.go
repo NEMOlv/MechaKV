@@ -1,25 +1,8 @@
-/*
-Copyright 2025 Nemo(shengyi) Lv
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package transaction
 
 import (
 	. "MechaKV/comment"
 	"MechaKV/datafile"
-	"errors"
 	"sync/atomic"
 )
 
@@ -73,170 +56,6 @@ func (tx *Transaction) put(key, value []byte, ttl uint32, timestamp uint64) erro
 	return nil
 }
 
-func (tx *Transaction) Put(key, value []byte, ttl uint32, timestamp uint64, condition PutCondition) (oldValue []byte, err error) {
-	if condition == PUT_NORMAL {
-		PutNormal := func() error {
-			return tx.put(key, value, ttl, timestamp)
-		}
-
-		err = tx.managed(PutNormal)
-	} else if condition == PUT_IF_NOT_EXISTS {
-		PutIfNotExists := func() error {
-			getValue, getErr := tx.get(key)
-			if getErr != nil && !errors.Is(getErr, ErrKeyNotFound) {
-				return getErr
-			}
-			// 如果Key已经存在，则直接返回nil
-			if getValue != nil {
-				return nil
-			}
-			return tx.put(key, value, ttl, timestamp)
-		}
-
-		err = tx.managed(PutIfNotExists)
-	} else if condition == PUT_IF_EXISTS {
-		PutIfNotExists := func() error {
-			_, getErr := tx.get(key)
-			if getErr != nil {
-				return getErr
-			}
-			return tx.put(key, value, ttl, timestamp)
-		}
-
-		err = tx.managed(PutIfNotExists)
-	} else if condition == PUT_AND_RETURN_OLD_VALUE {
-		PutAndReturnOldValue := func() error {
-			var getErr error
-			oldValue, getErr = tx.get(key)
-			if getErr != nil && !errors.Is(getErr, ErrKeyNotFound) {
-				return getErr
-			}
-			return tx.put(key, value, ttl, timestamp)
-		}
-
-		err = tx.managed(PutAndReturnOldValue)
-	} else if condition == APPEND_VALUE {
-		AppendValue := func() error {
-			var getErr error
-			oldValue, getErr = tx.get(key)
-			if getErr != nil && !errors.Is(getErr, ErrKeyNotFound) {
-				return getErr
-			}
-			if oldValue != nil {
-				value = append(oldValue, value...)
-			}
-
-			return tx.put(key, value, ttl, timestamp)
-		}
-		err = tx.managed(AppendValue)
-	} else if condition == UPDATE_TTL {
-		UpdateTTL := func() error {
-			var getErr error
-			oldValue, getErr = tx.get(key)
-			if getErr != nil {
-				return getErr
-			}
-			return tx.put(key, oldValue, ttl, timestamp)
-		}
-		err = tx.managed(UpdateTTL)
-	}
-
-	if err != nil {
-		return nil, err
-	}
-	return
-}
-
-func (tx *Transaction) BatchPut(key, value [][]byte, ttl uint32, timestamp uint64, condition PutCondition) (oldValue [][]byte, err error) {
-	if condition == PUT_NORMAL {
-		BatchPut := func() (err error) {
-			for i := 0; i < len(key); i++ {
-				if err = tx.put(key[i], value[i], ttl, timestamp); err != nil {
-					return
-				}
-			}
-			return
-		}
-
-		err = tx.managed(BatchPut)
-	} else if condition == PUT_IF_NOT_EXISTS {
-		BatchPutIfNotExists := func() (err error) {
-			for i := 0; i < len(key); i++ {
-				getValue, getErr := tx.get(key[i])
-				if getErr != nil && !errors.Is(getErr, ErrKeyNotFound) {
-					return getErr
-				}
-				// 如果Key已经存在，则直接返回nil
-				if getValue != nil {
-					return
-				}
-				if err = tx.put(key[i], value[i], ttl, timestamp); err != nil {
-					return
-				}
-			}
-			return
-		}
-
-		err = tx.managed(BatchPutIfNotExists)
-	} else if condition == PUT_IF_EXISTS {
-		BatchPutIfExists := func() (err error) {
-			for i := 0; i < len(key); i++ {
-				_, getErr := tx.get(key[i])
-				if getErr != nil {
-					return getErr
-				}
-				if err = tx.put(key[i], value[i], ttl, timestamp); err != nil {
-					return
-				}
-			}
-			return
-		}
-
-		err = tx.managed(BatchPutIfExists)
-	} else if condition == PUT_AND_RETURN_OLD_VALUE {
-		BatchPutAndReturnOldValue := func() (err error) {
-			var getErr error
-			var tempValue []byte
-			for i := 0; i < len(key); i++ {
-				tempValue, getErr = tx.get(key[i])
-				if getErr != nil && !errors.Is(getErr, ErrKeyNotFound) {
-					return getErr
-				}
-				if err = tx.put(key[i], value[i], ttl, timestamp); err != nil {
-					oldValue = nil
-					return
-				}
-				oldValue = append(oldValue, tempValue)
-			}
-			return
-		}
-
-		err = tx.managed(BatchPutAndReturnOldValue)
-	} else if condition == UPDATE_TTL {
-		BatchUpdateTTL := func() (err error) {
-			var getErr error
-			var tempValue []byte
-			for i := 0; i < len(key); i++ {
-				tempValue, getErr = tx.get(key[i])
-				if getErr != nil {
-					return getErr
-				}
-				if err = tx.put(key[i], tempValue, ttl, timestamp); err != nil {
-					return
-				}
-			}
-			return
-		}
-		err = tx.managed(BatchUpdateTTL)
-	}
-
-	if err != nil {
-		return nil, err
-	}
-
-	return
-}
-
 func (tx *Transaction) delete(key []byte) error {
 	if len(key) == 0 {
 		return ErrKeyIsEmpty
@@ -261,26 +80,6 @@ func (tx *Transaction) delete(key []byte) error {
 
 	// 将删除的数据写入待写数组
 	return nil
-}
-
-func (tx *Transaction) Delete(key []byte) (err error) {
-	err = tx.managed(func() (err error) {
-		err = tx.delete(key)
-		return err
-	})
-	return
-}
-
-func (tx *Transaction) BatchDelete(key [][]byte) (err error) {
-	err = tx.managed(func() (err error) {
-		for i := 0; i < len(key); i++ {
-			if err = tx.delete(key[i]); err != nil {
-				return
-			}
-		}
-		return
-	})
-	return
 }
 
 func (tx *Transaction) get(key []byte) ([]byte, error) {
@@ -335,36 +134,6 @@ func (tx *Transaction) getKvPair(key []byte) (*KvPair, error) {
 
 	// 从数据库中查找
 	return tx.tm.db.GetKvPairByPosition(kvPairPos)
-}
-
-func (tx *Transaction) Get(key []byte) (value []byte, err error) {
-	err = tx.managed(func() (err error) {
-		value, err = tx.get(key)
-		return
-	})
-	return
-}
-
-func (tx *Transaction) GetKvPair(key []byte) (kvPair *KvPair, err error) {
-	err = tx.managed(func() (err error) {
-		kvPair, err = tx.getKvPair(key)
-		return
-	})
-	return
-}
-
-func (tx *Transaction) BatchGet(key [][]byte) (value [][]byte, err error) {
-	err = tx.managed(func() (err error) {
-		var tempValue []byte
-		for i := 0; i < len(key); i++ {
-			if tempValue, err = tx.get(key[i]); err != nil {
-				return
-			}
-			value = append(value, tempValue)
-		}
-		return
-	})
-	return
 }
 
 // lock locks the database based on the transaction type.

@@ -61,3 +61,5 @@ var (
 	ErrInvalidCRC = errors.New("invalid CRC value, datafile maybe corrupted")
 	EOF           = io.EOF
 )
+
+var ErrWrongTypeOperation = errors.New("WRONGTYPE Operation against a key holding the wrong kind of value")

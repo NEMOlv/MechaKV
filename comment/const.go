@@ -16,7 +16,10 @@ limitations under the License.
 
 package comment
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"math"
+)
 
 const MaxKvPairHeaderSize int64 = 4 + 1 + 1 + binary.MaxVarintLen64*2 + binary.MaxVarintLen32*3
 
@@ -66,3 +69,19 @@ const (
 )
 
 const DataFilePermision = 0644
+
+const (
+	MaxMetadataSize   = 1 + binary.MaxVarintLen64*2 + binary.MaxVarintLen32
+	ExtraListMetaSize = binary.MaxVarintLen64 * 2
+
+	InitialListMark = math.MaxUint64 / 2
+)
+
+type RedisDataType = byte
+
+const (
+	Set RedisDataType = iota
+	Hash
+	List
+	ZSet
+)

@@ -71,6 +71,7 @@ func (client *Client) Close() (err error) {
 	return
 }
 
+// 基础KV数据结构
 // 添加数据
 // Put 添加数据
 func (client *Client) Put(key, value []byte, opOpts ...func(*PutOptions)) (err error) {
