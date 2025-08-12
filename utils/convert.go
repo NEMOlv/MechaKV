@@ -1,5 +1,7 @@
 package utils
 
+import "strconv"
+
 func convertSlice[From, To any](src []From, convert func(From) To) []To {
 	dst := make([]To, len(src))
 	for i, e := range src {
@@ -38,4 +40,13 @@ func UintSlice2int16Slice(ints []uint) []int16 {
 
 func UintSlice2int8Slice(ints []uint) []int8 {
 	return convertSlice(ints, func(from uint) int8 { return int8(from) })
+}
+
+func BytesToFloat64(val []byte) float64 {
+	f, _ := strconv.ParseFloat(string(val), 64)
+	return f
+}
+
+func Float64ToBytes(val float64) []byte {
+	return []byte(strconv.FormatFloat(val, 'f', -1, 64))
 }
