@@ -17,18 +17,20 @@ limitations under the License.
 package index
 
 import (
+	. "MechaKV/comment"
 	"bytes"
 	"github.com/google/btree"
 	"sort"
 	"sync"
 )
 
-// BTree
+// BTree 结构体
 type BTree struct {
 	tree *btree.BTree
 	lock *sync.RWMutex
 }
 
+// NewBTree 新建BTree
 func NewBTree() *BTree {
 	return &BTree{
 		tree: btree.New(64),
@@ -36,20 +38,22 @@ func NewBTree() *BTree {
 	}
 }
 
-func (btree *BTree) Put(key []byte, pos *KvPairPos) *KvPairPos {
-	btree.lock.Lock()
+// Put 添加索引
+func (bt *BTree) Put(key []byte, pos *KvPairPos) *KvPairPos {
+	bt.lock.Lock()
 	item := &Item{Key: key, Pos: pos}
-	oldItem := btree.tree.ReplaceOrInsert(item)
-	btree.lock.Unlock()
+	oldItem := bt.tree.ReplaceOrInsert(item)
+	bt.lock.Unlock()
 	if oldItem == nil {
 		return nil
 	}
 	return oldItem.(*Item).Pos
 }
 
-func (btree *BTree) Get(key []byte) *KvPairPos {
+// Get 获取索引
+func (bt *BTree) Get(key []byte) *KvPairPos {
 	inItem := &Item{Key: key}
-	outItem := btree.tree.Get(inItem)
+	outItem := bt.tree.Get(inItem)
 	// 判空操作，因为nil值无法进行强转
 	if outItem == nil {
 		return nil
@@ -57,33 +61,103 @@ func (btree *BTree) Get(key []byte) *KvPairPos {
 	return outItem.(*Item).Pos
 }
 
-func (btree *BTree) Delete(key []byte) (*KvPairPos, bool) {
-	btree.lock.Lock()
+// Delete 删除索引
+func (bt *BTree) Delete(key []byte) (*KvPairPos, bool) {
+	bt.lock.Lock()
 	item := &Item{Key: key}
-	oldItem := btree.tree.Delete(item)
-	btree.lock.Unlock()
+	oldItem := bt.tree.Delete(item)
+	bt.lock.Unlock()
 	if oldItem == nil {
 		return nil, false
 	}
 	return oldItem.(*Item).Pos, true
 }
 
-func (btree *BTree) Iterator(reverse bool) IndexIterator {
-	if btree.tree == nil {
+// Iterator 生成一个迭代器
+func (bt *BTree) Iterator(reverse bool) IndexIterator {
+	if bt.tree == nil {
 		return nil
 	}
-	btree.lock.RLock()
-	defer btree.lock.RUnlock()
+	bt.lock.RLock()
+	defer bt.lock.RUnlock()
 
-	return newBTreeIterator(btree.tree, reverse)
+	return newBTreeIterator(bt.tree, reverse)
 }
 
-func (btree *BTree) Size() int {
-	return btree.tree.Len()
+// Size 返回BTree大小
+func (bt *BTree) Size() int {
+	return bt.tree.Len()
 }
 
-func (btree *BTree) Close() error {
+// Close 关闭BTree
+func (bt *BTree) Close() error {
 	return nil
+}
+
+// Ascend 全局升序遍历
+func (bt *BTree) Ascend(handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos {
+	return bt.Iterate(Ascend, nil, nil, handleFn)
+}
+
+// Descend 全局降序遍历
+func (bt *BTree) Descend(handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos {
+	return bt.Iterate(Descend, nil, nil, handleFn)
+}
+
+// AscendRange 范围升序遍历
+func (bt *BTree) AscendRange(startKey, endKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos {
+	return bt.Iterate(Ascend, startKey, endKey, handleFn)
+}
+
+// DescendRange 范围降序遍历
+func (bt *BTree) DescendRange(startKey, endKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos {
+	return bt.Iterate(Descend, startKey, endKey, handleFn)
+}
+
+// AscendGreaterOrEqual 大于等于某个key的升序遍历
+func (bt *BTree) AscendGreaterOrEqual(startKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos {
+	return bt.Iterate(Ascend, startKey, nil, handleFn)
+}
+
+// DescendLessOrEqual 小于等于某个key的降序遍历
+func (bt *BTree) DescendLessOrEqual(startKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos {
+	return bt.Iterate(Descend, startKey, nil, handleFn)
+}
+
+func (bt *BTree) Iterate(iterateType IterateType, startKey, endKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos {
+	bt.lock.RLock()
+	defer bt.lock.RUnlock()
+
+	var KvPairPosSlice []*KvPairPos
+
+	internalHandleFn := func(item btree.Item) bool {
+		ok, err := handleFn(item.(*Item).Key, item.(*Item).Pos)
+		if err != nil {
+			return false
+		}
+
+		if ok {
+			kvPairPos := item.(*Item).Pos
+			kvPairPos.Key = item.(*Item).Key
+			KvPairPosSlice = append(KvPairPosSlice, kvPairPos)
+		}
+		return ok
+	}
+
+	if iterateType == Ascend && startKey != nil && endKey == nil {
+		bt.tree.AscendGreaterOrEqual(&Item{Key: startKey}, internalHandleFn)
+	} else if iterateType == Ascend && startKey != nil && endKey != nil {
+		bt.tree.AscendRange(&Item{Key: startKey}, &Item{Key: endKey}, internalHandleFn)
+	} else if iterateType == Ascend && startKey == nil && endKey == nil {
+		bt.tree.Ascend(internalHandleFn)
+	} else if iterateType == Descend && startKey != nil && endKey == nil {
+		bt.tree.DescendLessOrEqual(&Item{Key: startKey}, internalHandleFn)
+	} else if iterateType == Descend && startKey != nil && endKey != nil {
+		bt.tree.DescendRange(&Item{Key: startKey}, &Item{Key: endKey}, internalHandleFn)
+	} else if iterateType == Descend && startKey == nil && endKey == nil {
+		bt.tree.Descend(internalHandleFn)
+	}
+	return KvPairPosSlice
 }
 
 // btreeIterator

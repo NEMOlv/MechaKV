@@ -17,6 +17,7 @@ limitations under the License.
 package index
 
 import (
+	. "MechaKV/comment"
 	"MechaKV/datafile"
 	"bytes"
 	"github.com/google/btree"
@@ -35,6 +36,13 @@ type Indexer interface {
 	Size() int
 	// Close 关闭索引
 	Close() error
+	Iterate(iterateType IterateType, startKey, endKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos
+	Ascend(handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos
+	Descend(handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos
+	AscendRange(startKey, endKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos
+	DescendRange(startKey, endKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos
+	AscendGreaterOrEqual(startKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos
+	DescendLessOrEqual(startKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos
 }
 
 type Item struct {

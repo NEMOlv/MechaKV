@@ -63,3 +63,5 @@ var (
 )
 
 var ErrWrongTypeOperation = errors.New("WRONGTYPE Operation against a key holding the wrong kind of value")
+
+var ErrLengthNotMatch = errors.New("length not match")

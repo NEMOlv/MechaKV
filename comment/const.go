@@ -85,3 +85,18 @@ const (
 	List
 	ZSet
 )
+
+type Aggregate = byte
+
+const (
+	Sum Aggregate = iota
+	Max
+	Min
+)
+
+type IterateType = byte
+
+const (
+	Ascend IterateType = iota
+	Descend
+)

@@ -22,8 +22,13 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"sort"
 	"time"
 )
+
+// 遍历
+// AscendGreaterOrEqual 遍历事务中所有大于等于指定key的键值对（升序）
+// 结合事务内pendingWrites和底层索引，保证事务隔离性
 
 // string
 func (tx *Transaction) put(key, value []byte, ttl uint32, timestamp uint64) error {
@@ -737,6 +742,66 @@ func (tx *Transaction) ZAdd(key []byte, score float64, member []byte) (notExist 
 	return
 }
 
+func (tx *Transaction) BatchZAdd(key [][]byte, score []float64, member [][]byte) (notExist bool, err error) {
+	if len(key) != len(score) || len(key) != len(member) {
+		return false, ErrLengthNotMatch
+	}
+
+	BatchZAdd := func() error {
+		for i := 0; i < len(key); i++ {
+			meta, err := tx.findMetadata(key[i], ZSet)
+			if err != nil {
+				return err
+			}
+
+			version := make([]byte, 8)
+			binary.LittleEndian.PutUint64(version, uint64(meta.version))
+			encZSetKey := bytes.Join([][]byte{key[i], version, member[i]}, nil)
+			// 查看是否已经存在
+			value, err := tx.get(encZSetKey)
+			if err != nil && !errors.Is(err, ErrKeyNotFound) {
+				return err
+			}
+			if errors.Is(err, ErrKeyNotFound) {
+				notExist = true
+			}
+			if !notExist {
+				if score[i] == utils.BytesToFloat64(value) {
+					return nil
+				}
+			}
+
+			if notExist {
+				meta.size++
+				err := tx.put(key[i], encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
+				if err != nil {
+					return err
+				}
+			}
+			if !notExist {
+				err = tx.delete(encZSetKey)
+				if err != nil {
+					return err
+				}
+			}
+			err = tx.put(encZSetKey, utils.Float64ToBytes(score[i]), PERSISTENT, uint64(time.Now().UnixMilli()))
+			if err != nil {
+				return err
+			}
+
+			err = tx.put(encZSetKey, value, PERSISTENT, uint64(time.Now().UnixMilli()))
+			encZSetKeyWithScore := bytes.Join([][]byte{key[i], version, value, member[i]}, nil)
+			_ = tx.put(encZSetKeyWithScore, nil, PERSISTENT, uint64(time.Now().UnixMilli()))
+		}
+
+		return nil
+	}
+
+	err = tx.managed(BatchZAdd)
+
+	return
+}
+
 func (tx *Transaction) ZScore(key []byte, member []byte) (score float64, err error) {
 	score = -1
 	ZScore := func() error {
@@ -762,4 +827,203 @@ func (tx *Transaction) ZScore(key []byte, member []byte) (score float64, err err
 	err = tx.managed(ZScore)
 
 	return
+}
+
+func (tx *Transaction) ZCard(key []byte) (uint32, error) {
+	meta, err := tx.findMetadata(key, ZSet)
+	if err != nil {
+		return 0, err
+	}
+	return meta.size, nil
+}
+
+// 遍历
+// 这段代码可以交给外部的handleFn实现
+func hasPrefix(key, value []byte) (bool, error) {
+	prefix := []byte("test")
+	_ = value
+	if !bytes.HasPrefix(prefix, key) {
+		return false, nil
+	}
+	return true, nil
+}
+
+// Ascend 升序全局遍历
+func (tx *Transaction) Ascend(handleFn func(key, value []byte) (bool, error)) ([]*KvPair, error) {
+	return tx.Iterate(Ascend, nil, nil, handleFn)
+}
+
+// Descend 降序全局遍历
+func (tx *Transaction) Descend(handleFn func(key, value []byte) (bool, error)) ([]*KvPair, error) {
+	return tx.Iterate(Descend, nil, nil, handleFn)
+}
+
+// AscendRange 升序范围遍历
+func (tx *Transaction) AscendRange(startKey, endKey []byte, handleFn func(key, value []byte) (bool, error)) ([]*KvPair, error) {
+	return tx.Iterate(Ascend, startKey, endKey, handleFn)
+}
+
+// DescendRange 降序范围遍历
+func (tx *Transaction) DescendRange(startKey, endKey []byte, handleFn func(key, value []byte) (bool, error)) ([]*KvPair, error) {
+	return tx.Iterate(Descend, startKey, endKey, handleFn)
+}
+
+// AscendGreaterOrEqual 大于等于某个指定值升序遍历
+func (tx *Transaction) AscendGreaterOrEqual(startKey []byte, handleFn func(key []byte, value []byte) (bool, error)) ([]*KvPair, error) {
+	return tx.Iterate(Ascend, startKey, nil, handleFn)
+}
+
+// DescendLessOrEqual 小于等于某个指定值降序遍历
+func (tx *Transaction) DescendLessOrEqual(startKey []byte, handleFn func(key, value []byte) (bool, error)) ([]*KvPair, error) {
+	return tx.Iterate(Descend, startKey, nil, handleFn)
+}
+
+// 返回的是无序数据
+// 存储开销低，执行开销低
+func (tx *Transaction) IterateUnordered(startKey, endKey []byte, handleFn func(key, value []byte) (bool, error)) ([]*KvPair, error) {
+	if tx.isClosed() {
+		return nil, ErrTxClosed
+	}
+
+	// 处理事务中新加入的待写KvPair，保证事务内部的一致性
+	KvPairInPendingWrites := make(map[string][]byte)
+	for key, pendingKvPair := range tx.pendingWrites {
+		// 筛选出大于等于目标key且未被删除的键
+		if bytes.Compare([]byte(key), startKey) >= 0 && pendingKvPair.Type != KvPairDeleted {
+			KvPairInPendingWrites[key] = pendingKvPair.Value
+		}
+	}
+
+	var KvPairs []*KvPair
+	internalHandleFn := func(currentKey []byte, pos *KvPairPos) (bool, error) {
+		var currentValue []byte
+		var err error
+		// 如果PendingWrites中存在，则直接取PendingWrites中的值
+		// 否则取数据库中的值
+		if pendingWriteValue, exist := KvPairInPendingWrites[string(currentKey)]; exist {
+			currentValue = pendingWriteValue
+			delete(KvPairInPendingWrites, string(currentKey))
+		} else {
+			currentValue, err = tx.tm.db.GetValueByPosition(pos)
+			if err != nil {
+				return false, err
+			}
+		}
+
+		ok, err := handleFn(currentKey, currentValue)
+		if err != nil {
+			return false, err
+		}
+		if ok {
+			kvPair := &KvPair{
+				Key:   currentKey,
+				Value: currentValue,
+			}
+			KvPairs = append(KvPairs, kvPair)
+		}
+		return ok, nil
+	}
+
+	tx.tm.db.Index.Iterate(Ascend, startKey, endKey, internalHandleFn)
+
+	for key, value := range KvPairInPendingWrites {
+		ok, err := handleFn([]byte(key), value)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			kvPair := &KvPair{
+				Key:   []byte(key),
+				Value: value,
+			}
+			KvPairs = append(KvPairs, kvPair)
+		}
+	}
+
+	return KvPairs, nil
+}
+
+// 返回有序数据
+// 存储开销低，执行开销高
+func (tx *Transaction) Iterate(iterateType IterateType, startKey, endKey []byte, handleFn func(key, value []byte) (bool, error)) ([]*KvPair, error) {
+	if tx.isClosed() {
+		return nil, ErrTxClosed
+	}
+
+	// 处理事务中新加入的待写KvPair，保证事务内部的一致性
+	KvPairInPendingWrites := make(map[string][]byte)
+	if iterateType == Ascend {
+		for key, pendingKvPair := range tx.pendingWrites {
+			// 筛选出大于等于目标key且未被删除的键
+			if bytes.Compare([]byte(key), startKey) >= 0 && pendingKvPair.Type != KvPairDeleted {
+				KvPairInPendingWrites[key] = pendingKvPair.Value
+			}
+		}
+	} else if iterateType == Descend {
+		for key, pendingKvPair := range tx.pendingWrites {
+			// 筛选出大于等于目标key且未被删除的键
+			if bytes.Compare([]byte(key), startKey) <= 0 && pendingKvPair.Type != KvPairDeleted {
+				KvPairInPendingWrites[key] = pendingKvPair.Value
+			}
+		}
+	}
+
+	var KvPairs []*KvPair
+	internalHandleFn := func(currentKey []byte, pos *KvPairPos) (bool, error) {
+		var currentValue []byte
+		var err error
+		// 如果PendingWrites中存在，则直接取PendingWrites中的值
+		// 否则取数据库中的值
+		if pendingWriteValue, exist := KvPairInPendingWrites[string(currentKey)]; exist {
+			currentValue = pendingWriteValue
+			delete(KvPairInPendingWrites, string(currentKey))
+		} else {
+			currentValue, err = tx.tm.db.GetValueByPosition(pos)
+			if err != nil {
+				return false, err
+			}
+		}
+
+		ok, err := handleFn(currentKey, currentValue)
+		if err != nil {
+			return false, err
+		}
+		if ok {
+			kvPair := &KvPair{
+				Key:   currentKey,
+				Value: currentValue,
+			}
+			KvPairs = append(KvPairs, kvPair)
+		}
+		return ok, nil
+	}
+
+	tx.tm.db.Index.Iterate(Ascend, startKey, endKey, internalHandleFn)
+
+	for key, value := range KvPairInPendingWrites {
+		key := []byte(key)
+		ok, err := handleFn(key, value)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			kvPair := &KvPair{
+				Key:   key,
+				Value: value,
+			}
+			KvPairs = append(KvPairs, kvPair)
+		}
+	}
+
+	if iterateType == Ascend {
+		sort.Slice(KvPairs, func(i, j int) bool {
+			return bytes.Compare(KvPairs[i].Key, KvPairs[j].Key) < 0
+		})
+	} else if iterateType == Descend {
+		sort.Slice(KvPairs, func(i, j int) bool {
+			return bytes.Compare(KvPairs[i].Key, KvPairs[j].Key) > 0
+		})
+	}
+
+	return KvPairs, nil
 }
