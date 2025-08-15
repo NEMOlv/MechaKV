@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"regexp"
 	"sort"
 	"time"
 )
@@ -341,6 +342,38 @@ func (tx *Transaction) BatchGet(key [][]byte) (value [][]byte, err error) {
 }
 
 // Set
+//+--------------------------------------+---------------+
+//|           Key                        |     Value     |
+//+--------------------------------------+---------------+
+//|  SetName|version|member|memberSize   |     NULL      |
+//|       Nbyte+8byte+Nbyte+8byte)       |    (0 byte)   |
+//+--------------------------------------+---------------+
+
+// Set basedata
+// SCARD 获取集合的成员数
+func (tx *Transaction) SCARD(key []byte) (size uint32, err error) {
+	SCARD := func() error {
+		meta, err := tx.findMetadata(key, Set)
+		if err != nil {
+			return err
+		}
+
+		// 这里应该返回一个ErrKeyNotFound
+		if meta.size == 0 {
+			return nil
+		}
+
+		size = meta.size
+
+		return nil
+	}
+
+	err = tx.managed(SCARD)
+
+	return
+}
+
+// Set put
 func (tx *Transaction) SAdd(key, member []byte) (exist bool, err error) {
 	SAdd := func() error {
 		meta, err := tx.findMetadata(key, Set)
@@ -350,7 +383,9 @@ func (tx *Transaction) SAdd(key, member []byte) (exist bool, err error) {
 
 		version := make([]byte, 8)
 		binary.LittleEndian.PutUint64(version, uint64(meta.version))
-		encSetKey := bytes.Join([][]byte{key, version, member}, nil)
+		memberSize := make([]byte, 8)
+		binary.LittleEndian.PutUint64(memberSize, uint64(len(member)))
+		encSetKey := bytes.Join([][]byte{key, version, member, memberSize}, nil)
 
 		exist = true
 		_, err = tx.get(encSetKey)
@@ -376,6 +411,7 @@ func (tx *Transaction) SAdd(key, member []byte) (exist bool, err error) {
 	return
 }
 
+// Set get
 func (tx *Transaction) SIsMember(key, member []byte) (exist bool, err error) {
 	SIsMember := func() error {
 		meta, err := tx.findMetadata(key, Set)
@@ -387,7 +423,9 @@ func (tx *Transaction) SIsMember(key, member []byte) (exist bool, err error) {
 		}
 		version := make([]byte, 8)
 		binary.LittleEndian.PutUint64(version, uint64(meta.version))
-		encSetKey := bytes.Join([][]byte{key, version, member}, nil)
+		memberSize := make([]byte, 8)
+		binary.LittleEndian.PutUint64(memberSize, uint64(len(member)))
+		encSetKey := bytes.Join([][]byte{key, version, member, memberSize}, nil)
 
 		exist = true
 		_, err = tx.get(encSetKey)
@@ -405,6 +443,45 @@ func (tx *Transaction) SIsMember(key, member []byte) (exist bool, err error) {
 	return
 }
 
+func (tx *Transaction) SMembers(key []byte) (members [][]byte, err error) {
+	SMembers := func() error {
+		meta, err := tx.findMetadata(key, Set)
+		if err != nil {
+			return err
+		}
+
+		// 这里应该返回一个ErrKeyNotFound
+		if meta.size == 0 {
+			return nil
+		}
+
+		prefix := key
+		hasPrefix := func(key, value []byte) (bool, error) {
+			_ = value
+			if !bytes.HasPrefix(prefix, key) {
+				return false, nil
+			}
+			return true, nil
+		}
+
+		kvPairs, err := tx.AscendGreaterOrEqual(key, hasPrefix)
+		// kvPairs[0]是元数据，需要排除掉
+		var memberSize int
+		var member []byte
+		for _, kvPair := range kvPairs[1:] {
+			memberSize = int(binary.LittleEndian.Uint64(kvPair.Key[len(kvPair.Key)-8:]))
+			member = kvPair.Key[len(kvPair.Key)-8-memberSize : len(kvPair.Key)-8]
+			members = append(members, member)
+		}
+
+		return nil
+	}
+
+	err = tx.managed(SMembers)
+
+	return
+}
+
 func (tx *Transaction) SRem(key, member []byte) (exist bool, err error) {
 	SRem := func() error {
 		meta, err := tx.findMetadata(key, Set)
@@ -416,7 +493,9 @@ func (tx *Transaction) SRem(key, member []byte) (exist bool, err error) {
 		}
 		version := make([]byte, 8)
 		binary.LittleEndian.PutUint64(version, uint64(meta.version))
-		encSetKey := bytes.Join([][]byte{key, version, member}, nil)
+		memberSize := make([]byte, 8)
+		binary.LittleEndian.PutUint64(memberSize, uint64(len(member)))
+		encSetKey := bytes.Join([][]byte{key, version, member, memberSize}, nil)
 
 		exist = true
 		_, err = tx.get(encSetKey)
@@ -447,6 +526,34 @@ func (tx *Transaction) SRem(key, member []byte) (exist bool, err error) {
 }
 
 // Hash
+//+--------------------------------------+---------------+
+//|           Key                        |     Value     |
+//+--------------------------------------+---------------+
+//|  HashName|version|filed|filedSize    |     value     |
+//|      (Nbyte+8byte+Nbyte+8byte)       |    (N byte)   |
+//+--------------------------------------+---------------+
+
+// hash basedata
+func (tx *Transaction) HLen(key []byte) (size uint32, err error) {
+	HLen := func() error {
+		meta, err := tx.findMetadata(key, Hash)
+		if err != nil {
+			return err
+		}
+		if meta.size == 0 {
+			return nil
+		}
+
+		size = meta.size
+		return nil
+	}
+
+	err = tx.managed(HLen)
+
+	return
+}
+
+// hash set
 func (tx *Transaction) HSet(key, field, value []byte) (notExist bool, err error) {
 	HSet := func() error {
 		// 从Value中查找元数据
@@ -457,7 +564,10 @@ func (tx *Transaction) HSet(key, field, value []byte) (notExist bool, err error)
 		version := make([]byte, 8)
 		binary.LittleEndian.PutUint64(version, uint64(meta.version))
 		// 构造 Hash的 SubKey
-		encHashSubKey := bytes.Join([][]byte{key, version, field}, nil)
+		fieldSize := make([]byte, 8)
+		binary.LittleEndian.PutUint64(fieldSize, uint64(len(field)))
+		// 构造 Hash的 SubKey
+		encHashSubKey := bytes.Join([][]byte{key, version, field, fieldSize}, nil)
 
 		if _, err = tx.get(encHashSubKey); errors.Is(err, ErrKeyNotFound) {
 			notExist = true
@@ -484,6 +594,96 @@ func (tx *Transaction) HSet(key, field, value []byte) (notExist bool, err error)
 	return
 }
 
+func (tx *Transaction) HSetIfNotExist(key, field, value []byte) (notExist bool, err error) {
+	HSet := func() error {
+		// 从Value中查找元数据
+		meta, err := tx.findMetadata(key, Hash)
+		if err != nil {
+			return err
+		}
+		version := make([]byte, 8)
+		binary.LittleEndian.PutUint64(version, uint64(meta.version))
+		fieldSize := make([]byte, 8)
+		binary.LittleEndian.PutUint64(fieldSize, uint64(len(field)))
+		// 构造 Hash的 SubKey
+		encHashSubKey := bytes.Join([][]byte{key, version, field, fieldSize}, nil)
+
+		if _, err = tx.get(encHashSubKey); errors.Is(err, ErrKeyNotFound) {
+			notExist = true
+		}
+
+		// 不存在则更新元数据
+		if notExist {
+			meta.size++
+			err = tx.put(key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
+			if err != nil {
+				return err
+			}
+
+			err = tx.put(encHashSubKey, value, PERSISTENT, uint64(time.Now().UnixMilli()))
+			if err != nil {
+				return err
+			}
+		} else {
+			return errors.New("key already exists")
+		}
+
+		return nil
+	}
+
+	err = tx.managed(HSet)
+
+	return
+}
+
+func (tx *Transaction) HBatchSet(key []byte, fields, values [][]byte) (notExist bool, err error) {
+	// 返回数组不匹配错
+	if len(fields) != len(values) {
+		return false, nil
+	}
+	HBatchSet := func() error {
+		// 从Value中查找元数据
+		meta, err := tx.findMetadata(key, Hash)
+		if err != nil {
+			return err
+		}
+		version := make([]byte, 8)
+		binary.LittleEndian.PutUint64(version, uint64(meta.version))
+		fieldSize := make([]byte, 8)
+		// 构造 Hash的 SubKey
+		for i := 0; i < len(fields); i++ {
+			clear(fieldSize)
+			binary.LittleEndian.PutUint64(fieldSize, uint64(len(fields[i])))
+			// 构造 Hash的 SubKey
+			encHashSubKey := bytes.Join([][]byte{key, version, fields[i], fieldSize}, nil)
+
+			if _, err = tx.get(encHashSubKey); errors.Is(err, ErrKeyNotFound) {
+				notExist = true
+			}
+
+			// 不存在则更新元数据
+			if notExist {
+				meta.size++
+				err = tx.put(key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
+				if err != nil {
+					return err
+				}
+			}
+			err = tx.put(encHashSubKey, values[i], PERSISTENT, uint64(time.Now().UnixMilli()))
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}
+
+	err = tx.managed(HBatchSet)
+
+	return
+}
+
+// hash get
 func (tx *Transaction) HGet(key, field []byte) (value []byte, err error) {
 	HGet := func() error {
 		meta, err := tx.findMetadata(key, Hash)
@@ -513,6 +713,226 @@ func (tx *Transaction) HGet(key, field []byte) (value []byte, err error) {
 	return
 }
 
+func (tx *Transaction) HBatchGet(key []byte, fields [][]byte) (values [][]byte, err error) {
+	HBatchGet := func() error {
+		meta, err := tx.findMetadata(key, Hash)
+		if err != nil {
+			return err
+		}
+
+		// 这里应该返回一个ErrKeyNotFound
+		if meta.size == 0 {
+			return nil
+		}
+
+		version := make([]byte, 8)
+		binary.LittleEndian.PutUint64(version, uint64(meta.version))
+		// 构造 Hash的 SubKey
+		for _, field := range fields {
+			encHashSubKey := bytes.Join([][]byte{key, version, field}, nil)
+
+			value, err := tx.get(encHashSubKey)
+			if err != nil {
+				return err
+			}
+			values = append(values, value)
+		}
+
+		return nil
+	}
+
+	err = tx.managed(HBatchGet)
+
+	return
+}
+
+func (tx *Transaction) HGetAll(key []byte) (fields, values [][]byte, err error) {
+	HGetAll := func() error {
+		meta, err := tx.findMetadata(key, Hash)
+		if err != nil {
+			return err
+		}
+
+		// 这里应该返回一个ErrKeyNotFound
+		if meta.size == 0 {
+			return nil
+		}
+
+		prefix := key
+		hasPrefix := func(key, value []byte) (bool, error) {
+			_ = value
+			if !bytes.HasPrefix(prefix, key) {
+				return false, nil
+			}
+			return true, nil
+		}
+
+		kvPairs, err := tx.AscendGreaterOrEqual(key, hasPrefix)
+		var filedSize int
+		// kvPairs[0]是元数据，需要排除掉
+		for _, kvPair := range kvPairs[1:] {
+			filedSize = int(binary.LittleEndian.Uint64(kvPair.Key[len(kvPair.Key)-8:]))
+			filed := kvPair.Key[len(kvPair.Key)-8-filedSize : len(kvPair.Key)-8]
+			fields = append(fields, filed)
+			values = append(values, kvPair.Value)
+		}
+
+		return nil
+	}
+
+	err = tx.managed(HGetAll)
+
+	return
+}
+
+func (tx *Transaction) HKeys(key []byte) (fields [][]byte, err error) {
+	HGetAll := func() error {
+		meta, err := tx.findMetadata(key, Hash)
+		if err != nil {
+			return err
+		}
+
+		// 这里应该返回一个ErrKeyNotFound
+		if meta.size == 0 {
+			return nil
+		}
+
+		prefix := key
+		hasPrefix := func(key, value []byte) (bool, error) {
+			_ = value
+			if !bytes.HasPrefix(prefix, key) {
+				return false, nil
+			}
+			return true, nil
+		}
+
+		kvPairs, err := tx.AscendGreaterOrEqual(key, hasPrefix)
+		var filedSize int
+		// kvPairs[0]是元数据，需要排除掉
+		for _, kvPair := range kvPairs[1:] {
+			filedSize = int(binary.LittleEndian.Uint64(kvPair.Key[len(kvPair.Key)-8:]))
+			filed := kvPair.Key[len(kvPair.Key)-8-filedSize : len(kvPair.Key)-8]
+			fields = append(fields, filed)
+		}
+
+		return nil
+	}
+
+	err = tx.managed(HGetAll)
+
+	return
+}
+
+func (tx *Transaction) HValues(key []byte) (values [][]byte, err error) {
+	HGetAll := func() error {
+		meta, err := tx.findMetadata(key, Hash)
+		if err != nil {
+			return err
+		}
+
+		// 这里应该返回一个ErrKeyNotFound
+		if meta.size == 0 {
+			return nil
+		}
+
+		prefix := key
+		hasPrefix := func(key, value []byte) (bool, error) {
+			_ = value
+			if !bytes.HasPrefix(prefix, key) {
+				return false, nil
+			}
+			return true, nil
+		}
+
+		kvPairs, err := tx.AscendGreaterOrEqual(key, hasPrefix)
+		// kvPairs[0]是元数据，需要排除掉
+		for _, kvPair := range kvPairs[1:] {
+			values = append(values, kvPair.Value)
+		}
+
+		return nil
+	}
+
+	err = tx.managed(HGetAll)
+
+	return
+}
+
+func (tx *Transaction) HScan(key []byte, cursor uint32, pattern string, count uint32) (fields, values [][]byte, err error) {
+	HScan := func() error {
+		meta, err := tx.findMetadata(key, Hash)
+		if err != nil {
+			return err
+		}
+
+		// 这里应该返回一个ErrKeyNotFound
+		if meta.size == 0 {
+			return nil
+		}
+
+		prefix := key
+		hasPrefix := func(key, value []byte) (bool, error) {
+			_ = value
+			if !bytes.HasPrefix(prefix, key) {
+				return false, nil
+			}
+			return true, nil
+		}
+
+		kvPairs, err := tx.AscendGreaterOrEqual(key, hasPrefix)
+		kvPairs = kvPairs[1:]
+		re := regexp.MustCompile(pattern)
+		var filedSize int
+		// kvPairs[0]是元数据，需要排除掉
+		for _, kvPair := range kvPairs[cursor : cursor+count] {
+			if re.MatchString(string(kvPair.Key)) {
+				filedSize = int(binary.LittleEndian.Uint64(kvPair.Key[len(kvPair.Key)-8:]))
+				filed := kvPair.Key[len(kvPair.Key)-8-filedSize : len(kvPair.Key)-8]
+				fields = append(fields, filed)
+				values = append(values, kvPair.Value)
+			}
+		}
+
+		return nil
+	}
+
+	err = tx.managed(HScan)
+
+	return
+}
+
+func (tx *Transaction) HExists(key, field []byte) (exists bool, err error) {
+	HGet := func() error {
+		meta, err := tx.findMetadata(key, Hash)
+		if err != nil {
+			return err
+		}
+
+		// 这里应该返回一个ErrKeyNotFound
+		if meta.size == 0 {
+			return nil
+		}
+		version := make([]byte, 8)
+		binary.LittleEndian.PutUint64(version, uint64(meta.version))
+		// 构造 Hash的 SubKey
+		encHashSubKey := bytes.Join([][]byte{key, version, field}, nil)
+
+		_, err = tx.get(encHashSubKey)
+		if err != nil {
+			return err
+		}
+
+		exists = true
+
+		return nil
+	}
+
+	err = tx.managed(HGet)
+
+	return
+}
+
+// hash delete
 func (tx *Transaction) HDel(key, field []byte) (exist bool, err error) {
 	HDel := func() error {
 		meta, err := tx.findMetadata(key, Hash)
@@ -557,7 +977,15 @@ func (tx *Transaction) HDel(key, field []byte) (exist bool, err error) {
 	return
 }
 
+//todo: HIncrby HIncrbyFloat
+
 // List
+// +--------------------------+---------------+
+// |           Key            |     Value     |
+// +--------------------------+---------------+
+// | ListName|version|index   |     value     |
+// |   (Nbyte+8byte+8byte)    |    (N byte)   |
+// +--------------------------+---------------+
 func (tx *Transaction) push(key, value []byte, isLeft bool) (uint32, error) {
 	// 查找元数据
 	meta, err := tx.findMetadata(key, List)
