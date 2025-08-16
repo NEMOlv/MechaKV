@@ -411,6 +411,46 @@ func (tx *Transaction) SAdd(key, member []byte) (exist bool, err error) {
 	return
 }
 
+func (tx *Transaction) SBatchAdd(key []byte, members [][]byte) (exist bool, err error) {
+	SAdd := func() error {
+		meta, err := tx.findMetadata(key, Set)
+		if err != nil {
+			return err
+		}
+
+		version := make([]byte, 8)
+		binary.LittleEndian.PutUint64(version, uint64(meta.version))
+		memberSize := make([]byte, 8)
+		for _, member := range members {
+			clear(memberSize)
+			binary.LittleEndian.PutUint64(memberSize, uint64(len(member)))
+			encSetKey := bytes.Join([][]byte{key, version, member, memberSize}, nil)
+			exist = true
+			_, err = tx.get(encSetKey)
+			if err != nil && !errors.Is(err, ErrKeyNotFound) {
+				return err
+			}
+			if err != nil && errors.Is(err, ErrKeyNotFound) {
+				exist = false
+				meta.size++
+				err = tx.put(key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
+				if err != nil {
+					return err
+				}
+				err = tx.put(encSetKey, nil, PERSISTENT, uint64(time.Now().UnixMilli()))
+				if err != nil {
+					return err
+				}
+			}
+		}
+
+		return nil
+	}
+
+	err = tx.managed(SAdd)
+	return
+}
+
 // Set get
 func (tx *Transaction) SIsMember(key, member []byte) (exist bool, err error) {
 	SIsMember := func() error {
@@ -482,6 +522,110 @@ func (tx *Transaction) SMembers(key []byte) (members [][]byte, err error) {
 	return
 }
 
+func (tx *Transaction) SRandMember(key []byte, count uint32) (members [][]byte, err error) {
+	SRandMember := func() error {
+		meta, err := tx.findMetadata(key, Set)
+		if err != nil {
+			return err
+		}
+
+		if meta.size == 0 {
+			return nil
+		}
+
+		prefix := key
+		hasPrefix := func(key, value []byte) (bool, error) {
+			_ = value
+			if !bytes.HasPrefix(prefix, key) {
+				return false, nil
+			}
+			return true, nil
+		}
+
+		var (
+			memberSize int
+			member     []byte
+		)
+		k, err := utils.RandomK(int(meta.size), int(count))
+		if err != nil {
+			return err
+		}
+		kvPairs, err := tx.AscendGreaterOrEqual(key, hasPrefix)
+		if err != nil {
+			return err
+		}
+		for _, i := range k {
+			memberSize = int(binary.LittleEndian.Uint64(kvPairs[i].Key[len(kvPairs[i].Key)-8:]))
+			member = kvPairs[i].Key[len(kvPairs[i].Key)-8-memberSize : len(kvPairs[i].Key)-8]
+			members = append(members, member)
+		}
+		return nil
+	}
+
+	err = tx.managed(SRandMember)
+	return
+}
+
+func (tx *Transaction) SPop(key []byte, count uint32) (members [][]byte, err error) {
+	SPop := func() error {
+		meta, err := tx.findMetadata(key, Set)
+		if err != nil {
+			return err
+		}
+
+		if meta.size == 0 {
+			return nil
+		}
+
+		prefix := key
+		hasPrefix := func(key, value []byte) (bool, error) {
+			_ = value
+			if !bytes.HasPrefix(prefix, key) {
+				return false, nil
+			}
+			return true, nil
+		}
+
+		version := make([]byte, 8)
+		binary.LittleEndian.PutUint64(version, uint64(meta.version))
+		var (
+			memberSize int
+			member     []byte
+		)
+		k, err := utils.RandomK(int(meta.size), int(count))
+		if err != nil {
+			return err
+		}
+		kvPairs, err := tx.AscendGreaterOrEqual(key, hasPrefix)
+		if err != nil {
+			return err
+		}
+		for _, i := range k {
+			memberSize = int(binary.LittleEndian.Uint64(kvPairs[i].Key[len(kvPairs[i].Key)-8:]))
+			member = kvPairs[i].Key[len(kvPairs[i].Key)-8-memberSize : len(kvPairs[i].Key)-8]
+			members = append(members, member)
+			err = tx.delete(kvPairs[i].Key)
+			if err != nil {
+				return err
+			}
+			meta.size--
+		}
+
+		if meta.size == 0 {
+			tx.delete(key)
+		} else {
+			err = tx.put(key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	err = tx.managed(SPop)
+	return
+}
+
 func (tx *Transaction) SRem(key, member []byte) (exist bool, err error) {
 	SRem := func() error {
 		meta, err := tx.findMetadata(key, Set)
@@ -521,6 +665,512 @@ func (tx *Transaction) SRem(key, member []byte) (exist bool, err error) {
 	}
 
 	err = tx.managed(SRem)
+
+	return
+}
+
+func (tx *Transaction) SDiff(source []byte, others [][]byte) (diffSet [][]byte, err error) {
+	SDiff := func() error {
+		sourceMeta, err := tx.findMetadata(source, Set)
+		if err != nil {
+			return err
+		}
+		// 这里应该返回一个ErrKeyNotFound
+		if sourceMeta.size == 0 {
+			return nil
+		}
+		otherMetas := make([]*metadata, len(others))
+		for i, otherSet := range others {
+			otherMeta, err := tx.findMetadata(otherSet, Set)
+			if err != nil {
+				return err
+			}
+			// 这里应该返回一个ErrKeyNotFound
+			if otherMeta.size == 0 {
+				return nil
+			}
+			otherMetas[i] = otherMeta
+		}
+
+		prefix := source
+		hasPrefix := func(key, value []byte) (bool, error) {
+			_ = value
+			if !bytes.HasPrefix(prefix, key) {
+				return false, nil
+			}
+			return true, nil
+		}
+
+		kvPairs, err := tx.AscendGreaterOrEqual(source, hasPrefix)
+		var memberSizeInt int
+		memberSizeByte := make([]byte, 8)
+		var member []byte
+		version := make([]byte, 8)
+		var isDiff bool
+		for _, kvPair := range kvPairs[1:] {
+			isDiff = true
+			memberSizeByte = kvPair.Key[len(kvPair.Key)-8:]
+			memberSizeInt = int(binary.LittleEndian.Uint64(memberSizeByte))
+			member = kvPair.Key[len(kvPair.Key)-8-memberSizeInt : len(kvPair.Key)-8]
+			for i, otherSet := range others {
+				clear(version)
+				binary.LittleEndian.PutUint64(version, uint64(otherMetas[i].version))
+				encSetKey := bytes.Join([][]byte{otherSet, version, member, memberSizeByte}, nil)
+				_, err = tx.get(encSetKey)
+				if err != nil && !errors.Is(err, ErrKeyNotFound) {
+					return err
+				}
+				if err == nil {
+					isDiff = false
+					break
+				}
+			}
+			if isDiff {
+				diffSet = append(diffSet, member)
+			}
+		}
+		return nil
+	}
+
+	err = tx.managed(SDiff)
+	return
+}
+
+func (tx *Transaction) SDiffStore(destination, source []byte, others [][]byte) (diffSet [][]byte, err error) {
+	SDiffStore := func() error {
+		destinationMeta, err := tx.findMetadata(destination, Set)
+		if err != nil {
+			return err
+		}
+		destinationVersion := make([]byte, 8)
+		binary.LittleEndian.PutUint64(destinationVersion, uint64(destinationMeta.version))
+
+		sourceMeta, err := tx.findMetadata(source, Set)
+		if err != nil {
+			return err
+		}
+		// 这里应该返回一个ErrKeyNotFound
+		if sourceMeta.size == 0 {
+			return nil
+		}
+		otherMetas := make([]*metadata, len(others))
+		for i, otherSet := range others {
+			otherMeta, err := tx.findMetadata(otherSet, Set)
+			if err != nil {
+				return err
+			}
+			// 这里应该返回一个ErrKeyNotFound
+			if otherMeta.size == 0 {
+				return nil
+			}
+			otherMetas[i] = otherMeta
+		}
+
+		prefix := source
+		hasPrefix := func(key, value []byte) (bool, error) {
+			_ = value
+			if !bytes.HasPrefix(prefix, key) {
+				return false, nil
+			}
+			return true, nil
+		}
+
+		kvPairs, err := tx.AscendGreaterOrEqual(source, hasPrefix)
+		var memberSizeInt int
+		memberSizeByte := make([]byte, 8)
+		var member []byte
+		version := make([]byte, 8)
+		var isDiff bool
+		for _, kvPair := range kvPairs[1:] {
+			isDiff = true
+			memberSizeByte = kvPair.Key[len(kvPair.Key)-8:]
+			memberSizeInt = int(binary.LittleEndian.Uint64(memberSizeByte))
+			member = kvPair.Key[len(kvPair.Key)-8-memberSizeInt : len(kvPair.Key)-8]
+			for i, otherSet := range others {
+				clear(version)
+				binary.LittleEndian.PutUint64(version, uint64(otherMetas[i].version))
+				encSetKey := bytes.Join([][]byte{otherSet, version, member, memberSizeByte}, nil)
+				_, err = tx.get(encSetKey)
+				if err != nil && !errors.Is(err, ErrKeyNotFound) {
+					return err
+				}
+				if err == nil {
+					isDiff = false
+					break
+				}
+			}
+			if isDiff {
+				diffSet = append(diffSet, member)
+				encSetKey := bytes.Join([][]byte{destination, destinationVersion, member, memberSizeByte}, nil)
+				err = tx.put(encSetKey, nil, PERSISTENT, uint64(time.Now().UnixMilli()))
+				if err != nil {
+					return err
+				}
+				destinationMeta.size++
+			}
+		}
+		err = tx.put(encodeMetadata(destinationMeta), nil, PERSISTENT, uint64(time.Now().UnixMilli()))
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+
+	err = tx.managed(SDiffStore)
+	return
+}
+
+func (tx *Transaction) SInter(source []byte, others [][]byte) (interSet [][]byte, err error) {
+	SInter := func() error {
+		sourceMeta, err := tx.findMetadata(source, Set)
+		if err != nil {
+			return err
+		}
+		// 这里应该返回一个ErrKeyNotFound
+		if sourceMeta.size == 0 {
+			return nil
+		}
+		otherMetas := make([]*metadata, len(others))
+		for i, otherSet := range others {
+			otherMeta, err := tx.findMetadata(otherSet, Set)
+			if err != nil {
+				return err
+			}
+			// 这里应该返回一个ErrKeyNotFound
+			if otherMeta.size == 0 {
+				return nil
+			}
+			otherMetas[i] = otherMeta
+		}
+
+		prefix := source
+		hasPrefix := func(key, value []byte) (bool, error) {
+			_ = value
+			if !bytes.HasPrefix(prefix, key) {
+				return false, nil
+			}
+			return true, nil
+		}
+
+		kvPairs, err := tx.AscendGreaterOrEqual(source, hasPrefix)
+		var memberSizeInt int
+		memberSizeByte := make([]byte, 8)
+		var member []byte
+		version := make([]byte, 8)
+		var isInter bool
+		for _, kvPair := range kvPairs[1:] {
+			isInter = true
+			memberSizeByte = kvPair.Key[len(kvPair.Key)-8:]
+			memberSizeInt = int(binary.LittleEndian.Uint64(memberSizeByte))
+			member = kvPair.Key[len(kvPair.Key)-8-memberSizeInt : len(kvPair.Key)-8]
+			for i, otherSet := range others {
+				clear(version)
+				binary.LittleEndian.PutUint64(version, uint64(otherMetas[i].version))
+				encSetKey := bytes.Join([][]byte{otherSet, version, member, memberSizeByte}, nil)
+				_, err = tx.get(encSetKey)
+				if err != nil && !errors.Is(err, ErrKeyNotFound) {
+					return err
+				}
+				if err != nil && errors.Is(err, ErrKeyNotFound) {
+					isInter = false
+					break
+				}
+			}
+			if isInter {
+				interSet = append(interSet, member)
+			}
+		}
+		return nil
+	}
+
+	err = tx.managed(SInter)
+	return
+}
+
+func (tx *Transaction) SInterStore(destination, source []byte, others [][]byte) (interSet [][]byte, err error) {
+	SInterStore := func() error {
+		destinationMeta, err := tx.findMetadata(destination, Set)
+		if err != nil {
+			return err
+		}
+		destinationVersion := make([]byte, 8)
+		binary.LittleEndian.PutUint64(destinationVersion, uint64(destinationMeta.version))
+
+		sourceMeta, err := tx.findMetadata(source, Set)
+		if err != nil {
+			return err
+		}
+		// 这里应该返回一个ErrKeyNotFound
+		if sourceMeta.size == 0 {
+			return nil
+		}
+		otherMetas := make([]*metadata, len(others))
+		for i, otherSet := range others {
+			otherMeta, err := tx.findMetadata(otherSet, Set)
+			if err != nil {
+				return err
+			}
+			// 这里应该返回一个ErrKeyNotFound
+			if otherMeta.size == 0 {
+				return nil
+			}
+			otherMetas[i] = otherMeta
+		}
+
+		prefix := source
+		hasPrefix := func(key, value []byte) (bool, error) {
+			_ = value
+			if !bytes.HasPrefix(prefix, key) {
+				return false, nil
+			}
+			return true, nil
+		}
+
+		kvPairs, err := tx.AscendGreaterOrEqual(source, hasPrefix)
+		var memberSizeInt int
+		memberSizeByte := make([]byte, 8)
+		var member []byte
+		version := make([]byte, 8)
+		var isInter bool
+		for _, kvPair := range kvPairs[1:] {
+			isInter = true
+			memberSizeByte = kvPair.Key[len(kvPair.Key)-8:]
+			memberSizeInt = int(binary.LittleEndian.Uint64(memberSizeByte))
+			member = kvPair.Key[len(kvPair.Key)-8-memberSizeInt : len(kvPair.Key)-8]
+			for i, otherSet := range others {
+				clear(version)
+				binary.LittleEndian.PutUint64(version, uint64(otherMetas[i].version))
+				encSetKey := bytes.Join([][]byte{otherSet, version, member, memberSizeByte}, nil)
+				_, err = tx.get(encSetKey)
+				if err != nil && !errors.Is(err, ErrKeyNotFound) {
+					return err
+				}
+				if err == nil && errors.Is(err, ErrKeyNotFound) {
+					isInter = false
+					break
+				}
+			}
+			if isInter {
+				interSet = append(interSet, member)
+				encSetKey := bytes.Join([][]byte{destination, destinationVersion, member, memberSizeByte}, nil)
+				err = tx.put(encSetKey, nil, PERSISTENT, uint64(time.Now().UnixMilli()))
+				if err != nil {
+					return err
+				}
+				destinationMeta.size++
+			}
+		}
+		err = tx.put(encodeMetadata(destinationMeta), nil, PERSISTENT, uint64(time.Now().UnixMilli()))
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+
+	err = tx.managed(SInterStore)
+	return
+}
+
+func (tx *Transaction) SUnion(sets [][]byte) (unionSet [][]byte, err error) {
+	SUnion := func() error {
+		setMetas := make([]*metadata, len(sets))
+		for i, set := range sets {
+			setMeta, err := tx.findMetadata(set, Set)
+			if err != nil {
+				return err
+			}
+			// 这里应该返回一个ErrKeyNotFound
+			if setMeta.size == 0 {
+				return nil
+			}
+			setMetas[i] = setMeta
+
+			prefix := set
+			hasPrefix := func(key, value []byte) (bool, error) {
+				_ = value
+				if !bytes.HasPrefix(prefix, key) {
+					return false, nil
+				}
+				return true, nil
+			}
+
+			kvPairs, err := tx.AscendGreaterOrEqual(set, hasPrefix)
+			var memberSizeInt int
+			memberSizeByte := make([]byte, 8)
+			var member []byte
+			for _, kvPair := range kvPairs[1:] {
+				memberSizeByte = kvPair.Key[len(kvPair.Key)-8:]
+				memberSizeInt = int(binary.LittleEndian.Uint64(memberSizeByte))
+				member = kvPair.Key[len(kvPair.Key)-8-memberSizeInt : len(kvPair.Key)-8]
+				unionSet = append(unionSet, member)
+			}
+		}
+		return nil
+	}
+
+	err = tx.managed(SUnion)
+	return
+}
+
+func (tx *Transaction) SUnionStore(destination []byte, sets [][]byte) (unionSet [][]byte, err error) {
+	SUnion := func() error {
+		destinationMeta, err := tx.findMetadata(destination, Set)
+		if err != nil {
+			return err
+		}
+		destinationVersion := make([]byte, 8)
+		binary.LittleEndian.PutUint64(destinationVersion, uint64(destinationMeta.version))
+
+		setMetas := make([]*metadata, len(sets))
+		for i, set := range sets {
+			setMeta, err := tx.findMetadata(set, Set)
+			if err != nil {
+				return err
+			}
+			// 这里应该返回一个ErrKeyNotFound
+			if setMeta.size == 0 {
+				return nil
+			}
+			setMetas[i] = setMeta
+
+			prefix := set
+			hasPrefix := func(key, value []byte) (bool, error) {
+				_ = value
+				if !bytes.HasPrefix(prefix, key) {
+					return false, nil
+				}
+				return true, nil
+			}
+
+			kvPairs, err := tx.AscendGreaterOrEqual(set, hasPrefix)
+			var memberSizeInt int
+			memberSizeByte := make([]byte, 8)
+			var member []byte
+			for _, kvPair := range kvPairs[1:] {
+				memberSizeByte = kvPair.Key[len(kvPair.Key)-8:]
+				memberSizeInt = int(binary.LittleEndian.Uint64(memberSizeByte))
+				member = kvPair.Key[len(kvPair.Key)-8-memberSizeInt : len(kvPair.Key)-8]
+				unionSet = append(unionSet, member)
+				encSetKey := bytes.Join([][]byte{destination, destinationVersion, member, memberSizeByte}, nil)
+				err = tx.put(encSetKey, nil, PERSISTENT, uint64(time.Now().UnixMilli()))
+				if err != nil {
+					return err
+				}
+				destinationMeta.size++
+			}
+		}
+		return nil
+	}
+
+	err = tx.managed(SUnion)
+	return
+}
+
+func (tx *Transaction) SMove(source, destination []byte) (err error) {
+	SMove := func() error {
+		sourceMeta, err := tx.findMetadata(source, Set)
+		if err != nil {
+			return err
+		}
+		// 这里应该返回一个ErrKeyNotFound
+		if sourceMeta.size == 0 {
+			return nil
+		}
+
+		destinationMeta, err := tx.findMetadata(destination, Set)
+		if err != nil {
+			return err
+		}
+
+		prefix := source
+		hasPrefix := func(key, value []byte) (bool, error) {
+			_ = value
+			if !bytes.HasPrefix(prefix, key) {
+				return false, nil
+			}
+			return true, nil
+		}
+
+		kvPairs, err := tx.AscendGreaterOrEqual(source, hasPrefix)
+		// kvPairs[0]是元数据，需要排除掉
+		var memberSizeInt int
+		memberSizeByte := make([]byte, 8)
+		var member []byte
+		version := make([]byte, 8)
+		binary.LittleEndian.PutUint64(version, uint64(destinationMeta.version))
+
+		for _, kvPair := range kvPairs[1:] {
+			memberSizeByte = kvPair.Key[len(kvPair.Key)-8:]
+			memberSizeInt = int(binary.LittleEndian.Uint64(memberSizeByte))
+			member = kvPair.Key[len(kvPair.Key)-8-memberSizeInt : len(kvPair.Key)-8]
+			encSetKey := bytes.Join([][]byte{destination, version, member, memberSizeByte}, nil)
+
+			_, err = tx.get(encSetKey)
+			if err != nil && !errors.Is(err, ErrKeyNotFound) {
+				return err
+			}
+
+			if err != nil && errors.Is(err, ErrKeyNotFound) {
+				destinationMeta.size++
+				err = tx.put(encSetKey, nil, PERSISTENT, uint64(time.Now().UnixMilli()))
+				if err != nil {
+					return err
+				}
+			}
+
+			tx.delete(kvPair.Key)
+		}
+		tx.delete(source)
+		err = tx.put(destination, encodeMetadata(destinationMeta), PERSISTENT, uint64(time.Now().UnixMilli()))
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+
+	err = tx.managed(SMove)
+	return
+}
+
+func (tx *Transaction) SScan(key []byte, cursor uint32, pattern string, count uint32) (members, values [][]byte, err error) {
+	SScan := func() error {
+		meta, err := tx.findMetadata(key, Set)
+		if err != nil {
+			return err
+		}
+
+		// 这里应该返回一个ErrKeyNotFound
+		if meta.size == 0 {
+			return nil
+		}
+
+		prefix := key
+		hasPrefix := func(key, value []byte) (bool, error) {
+			_ = value
+			if !bytes.HasPrefix(prefix, key) {
+				return false, nil
+			}
+			return true, nil
+		}
+
+		kvPairs, err := tx.AscendGreaterOrEqual(key, hasPrefix)
+		kvPairs = kvPairs[1:]
+		re := regexp.MustCompile(pattern)
+		var memberSize int
+		// kvPairs[0]是元数据，需要排除掉
+		for _, kvPair := range kvPairs[cursor : cursor+count] {
+			if re.MatchString(string(kvPair.Key)) {
+				memberSize = int(binary.LittleEndian.Uint64(kvPair.Key[len(kvPair.Key)-8:]))
+				member := kvPair.Key[len(kvPair.Key)-8-memberSize : len(kvPair.Key)-8]
+				members = append(members, member)
+				values = append(values, kvPair.Value)
+			}
+		}
+
+		return nil
+	}
+
+	err = tx.managed(SScan)
 
 	return
 }
