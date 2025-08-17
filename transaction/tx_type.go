@@ -626,7 +626,7 @@ func (tx *Transaction) SPop(key []byte, count uint32) (members [][]byte, err err
 	return
 }
 
-func (tx *Transaction) SRem(key, member []byte) (exist bool, err error) {
+func (tx *Transaction) SRem(key, member []byte) (ok bool, err error) {
 	SRem := func() error {
 		meta, err := tx.findMetadata(key, Set)
 		if err != nil {
@@ -641,14 +641,18 @@ func (tx *Transaction) SRem(key, member []byte) (exist bool, err error) {
 		binary.LittleEndian.PutUint64(memberSize, uint64(len(member)))
 		encSetKey := bytes.Join([][]byte{key, version, member, memberSize}, nil)
 
-		exist = true
 		_, err = tx.get(encSetKey)
 		if err != nil && !errors.Is(err, ErrKeyNotFound) {
+
 			return err
 		}
 		if err != nil && errors.Is(err, ErrKeyNotFound) {
-			exist = false
 			return nil
+		}
+
+		err = tx.delete(encSetKey)
+		if err != nil {
+			return err
 		}
 
 		meta.size--
@@ -656,10 +660,8 @@ func (tx *Transaction) SRem(key, member []byte) (exist bool, err error) {
 		if err != nil {
 			return err
 		}
-		err = tx.delete(encSetKey)
-		if err != nil {
-			return err
-		}
+
+		ok = true
 
 		return nil
 	}
@@ -1022,6 +1024,7 @@ func (tx *Transaction) SUnionStore(destination []byte, sets [][]byte) (unionSet 
 		binary.LittleEndian.PutUint64(destinationVersion, uint64(destinationMeta.version))
 
 		setMetas := make([]*metadata, len(sets))
+		temp := make(map[string]int)
 		for i, set := range sets {
 			setMeta, err := tx.findMetadata(set, Set)
 			if err != nil {
@@ -1050,14 +1053,22 @@ func (tx *Transaction) SUnionStore(destination []byte, sets [][]byte) (unionSet 
 				memberSizeByte = kvPair.Key[len(kvPair.Key)-8:]
 				memberSizeInt = int(binary.LittleEndian.Uint64(memberSizeByte))
 				member = kvPair.Key[len(kvPair.Key)-8-memberSizeInt : len(kvPair.Key)-8]
-				unionSet = append(unionSet, member)
-				encSetKey := bytes.Join([][]byte{destination, destinationVersion, member, memberSizeByte}, nil)
-				err = tx.put(encSetKey, nil, PERSISTENT, uint64(time.Now().UnixMilli()))
-				if err != nil {
-					return err
+				if temp[string(member)] == 0 {
+					unionSet = append(unionSet, member)
+					encSetKey := bytes.Join([][]byte{destination, destinationVersion, member, memberSizeByte}, nil)
+					err = tx.put(encSetKey, nil, PERSISTENT, uint64(time.Now().UnixMilli()))
+					if err != nil {
+						return err
+					}
+					destinationMeta.size++
 				}
-				destinationMeta.size++
+				temp[string(member)]++
 			}
+		}
+
+		err = tx.put(destination, encodeMetadata(destinationMeta), PERSISTENT, uint64(time.Now().UnixMilli()))
+		if err != nil {
+			return err
 		}
 		return nil
 	}
@@ -1132,7 +1143,7 @@ func (tx *Transaction) SMove(source, destination []byte) (err error) {
 	return
 }
 
-func (tx *Transaction) SScan(key []byte, cursor uint32, pattern string, count uint32) (members, values [][]byte, err error) {
+func (tx *Transaction) SScan(key []byte, cursor uint32, pattern string, count uint32) (members [][]byte, err error) {
 	SScan := func() error {
 		meta, err := tx.findMetadata(key, Set)
 		if err != nil {
@@ -1163,7 +1174,6 @@ func (tx *Transaction) SScan(key []byte, cursor uint32, pattern string, count ui
 				memberSize = int(binary.LittleEndian.Uint64(kvPair.Key[len(kvPair.Key)-8:]))
 				member := kvPair.Key[len(kvPair.Key)-8-memberSize : len(kvPair.Key)-8]
 				members = append(members, member)
-				values = append(values, kvPair.Value)
 			}
 		}
 
@@ -1766,6 +1776,63 @@ func (tx *Transaction) RPop(key []byte) (value []byte, err error) {
 }
 
 // ZSet
+
+// ZSet basedata
+// ZCard 获取有序集合的成员数
+func (tx *Transaction) ZCard(key []byte) (size uint32, err error) {
+	ZCard := func() error {
+		meta, err := tx.findMetadata(key, ZSet)
+		if err != nil {
+			return err
+		}
+		size = meta.size
+		return nil
+	}
+
+	err = tx.managed(ZCard)
+
+	return
+}
+
+// ZCOUNT 计算在有序集合中指定区间分数的成员数
+func (tx *Transaction) ZCOUNT(key []byte, min_score, max_score float64) (size uint32, err error) {
+	ZCOUNT := func() error {
+		_, err = tx.findMetadata(key, ZSet)
+		if err != nil {
+			return err
+		}
+
+		prefix := key
+		hasPrefix := func(key, value []byte) (bool, error) {
+			_ = value
+			if !bytes.HasPrefix(prefix, key) {
+				return false, nil
+			}
+			return true, nil
+		}
+
+		kvPairs, err := tx.AscendGreaterOrEqual(key, hasPrefix)
+		if err != nil {
+			return err
+		}
+		var score float64
+		for _, kvPair := range kvPairs[1:] {
+			score = utils.BytesToFloat64(kvPair.Value)
+			if score >= min_score && score <= max_score {
+				size++
+			}
+		}
+
+		return nil
+	}
+
+	err = tx.managed(ZCOUNT)
+
+	return size, nil
+}
+
+// ZSet set
+// ZAdd 向有序集合添加一个成员，或者更新已存在成员的分数
 func (tx *Transaction) ZAdd(key []byte, score float64, member []byte) (notExist bool, err error) {
 	ZAdd := func() error {
 		meta, err := tx.findMetadata(key, ZSet)
@@ -1775,7 +1842,9 @@ func (tx *Transaction) ZAdd(key []byte, score float64, member []byte) (notExist 
 
 		version := make([]byte, 8)
 		binary.LittleEndian.PutUint64(version, uint64(meta.version))
-		encZSetKey := bytes.Join([][]byte{key, version, member}, nil)
+		memberSize := make([]byte, 8)
+		binary.LittleEndian.PutUint64(memberSize, uint64(len(member)))
+		encZSetKey := bytes.Join([][]byte{key, version, member, memberSize}, nil)
 		// 查看是否已经存在
 		value, err := tx.get(encZSetKey)
 		if err != nil && !errors.Is(err, ErrKeyNotFound) {
@@ -1820,7 +1889,8 @@ func (tx *Transaction) ZAdd(key []byte, score float64, member []byte) (notExist 
 	return
 }
 
-func (tx *Transaction) BatchZAdd(key [][]byte, score []float64, member [][]byte) (notExist bool, err error) {
+// ZBatchAdd 向有序集合添加多个成员，或者更新已存在成员的分数
+func (tx *Transaction) ZBatchAdd(key [][]byte, score []float64, member [][]byte) (notExist bool, err error) {
 	if len(key) != len(score) || len(key) != len(member) {
 		return false, ErrLengthNotMatch
 	}
@@ -1834,7 +1904,9 @@ func (tx *Transaction) BatchZAdd(key [][]byte, score []float64, member [][]byte)
 
 			version := make([]byte, 8)
 			binary.LittleEndian.PutUint64(version, uint64(meta.version))
-			encZSetKey := bytes.Join([][]byte{key[i], version, member[i]}, nil)
+			memberSize := make([]byte, 8)
+			binary.LittleEndian.PutUint64(memberSize, uint64(len(member[i])))
+			encZSetKey := bytes.Join([][]byte{key[i], version, member[i], memberSize}, nil)
 			// 查看是否已经存在
 			value, err := tx.get(encZSetKey)
 			if err != nil && !errors.Is(err, ErrKeyNotFound) {
@@ -1893,7 +1965,9 @@ func (tx *Transaction) ZScore(key []byte, member []byte) (score float64, err err
 
 		version := make([]byte, 8)
 		binary.LittleEndian.PutUint64(version, uint64(meta.version))
-		encZSetKey := bytes.Join([][]byte{key, version, member}, nil)
+		memberSize := make([]byte, 8)
+		binary.LittleEndian.PutUint64(memberSize, uint64(len(member)))
+		encZSetKey := bytes.Join([][]byte{key, version, member, memberSize}, nil)
 		value, err := tx.get(encZSetKey)
 		if err != nil {
 			return err
@@ -1907,23 +1981,539 @@ func (tx *Transaction) ZScore(key []byte, member []byte) (score float64, err err
 	return
 }
 
-func (tx *Transaction) ZCard(key []byte) (uint32, error) {
-	meta, err := tx.findMetadata(key, ZSet)
-	if err != nil {
-		return 0, err
+// ZRange 获取有序集合的成员数
+func (tx *Transaction) ZRange(key []byte, start, stop uint32, isAscend bool) (members [][]byte, scores []float64, err error) {
+	ZRange := func() error {
+		meta, err := tx.findMetadata(key, ZSet)
+		if err != nil {
+			return err
+		}
+
+		prefix := key
+		hasPrefix := func(key, value []byte) (bool, error) {
+			_ = value
+			if !bytes.HasPrefix(prefix, key) {
+				return false, nil
+			}
+			return true, nil
+		}
+
+		var kvPairs []*KvPair
+		if isAscend {
+			kvPairs, err = tx.AscendGreaterOrEqual(key, hasPrefix)
+			if err != nil {
+				return err
+			}
+			kvPairs = kvPairs[1:]
+			sort.SliceStable(kvPairs, func(i, j int) bool {
+				return utils.BytesToFloat64(kvPairs[i].Value) < utils.BytesToFloat64(kvPairs[j].Value)
+			})
+		} else {
+			kvPairs, err = tx.DescendLessOrEqual(key, hasPrefix)
+			if err != nil {
+				return err
+			}
+			kvPairs = kvPairs[:len(kvPairs)-1]
+			sort.SliceStable(kvPairs, func(i, j int) bool {
+				return utils.BytesToFloat64(kvPairs[i].Value) > utils.BytesToFloat64(kvPairs[j].Value)
+			})
+		}
+
+		kvPairs = kvPairs[start:stop]
+		var score float64
+		version := make([]byte, 8)
+		binary.LittleEndian.PutUint64(version, uint64(meta.version))
+		var memberSize int
+		var member []byte
+		for _, kvPair := range kvPairs {
+			memberSize = int(binary.LittleEndian.Uint64(kvPair.Key[len(kvPair.Key)-8:]))
+			member = kvPair.Key[len(kvPair.Key)-8-memberSize : len(kvPair.Key)-8]
+			members = append(members, member)
+			score = utils.BytesToFloat64(kvPair.Value)
+			scores = append(scores, score)
+		}
+
+		return nil
 	}
-	return meta.size, nil
+
+	err = tx.managed(ZRange)
+
+	return
 }
 
-// 遍历
-// 这段代码可以交给外部的handleFn实现
-func hasPrefix(key, value []byte) (bool, error) {
-	prefix := []byte("test")
-	_ = value
-	if !bytes.HasPrefix(prefix, key) {
-		return false, nil
+// ZRange 获取有序集合的成员数
+func (tx *Transaction) ZRangeMember(key []byte, start, stop uint32, isAscend bool) (members [][]byte, err error) {
+	ZRangeMember := func() error {
+		meta, err := tx.findMetadata(key, ZSet)
+		if err != nil {
+			return err
+		}
+
+		prefix := key
+		hasPrefix := func(key, value []byte) (bool, error) {
+			_ = value
+			if !bytes.HasPrefix(prefix, key) {
+				return false, nil
+			}
+			return true, nil
+		}
+
+		var kvPairs []*KvPair
+		if isAscend {
+			kvPairs, err = tx.AscendGreaterOrEqual(key, hasPrefix)
+			if err != nil {
+				return err
+			}
+			kvPairs = kvPairs[1:]
+			sort.SliceStable(kvPairs, func(i, j int) bool {
+				return utils.BytesToFloat64(kvPairs[i].Value) < utils.BytesToFloat64(kvPairs[j].Value)
+			})
+		} else {
+			kvPairs, err = tx.DescendLessOrEqual(key, hasPrefix)
+			if err != nil {
+				return err
+			}
+			kvPairs = kvPairs[:len(kvPairs)-1]
+			sort.SliceStable(kvPairs, func(i, j int) bool {
+				return utils.BytesToFloat64(kvPairs[i].Value) > utils.BytesToFloat64(kvPairs[j].Value)
+			})
+		}
+
+		kvPairs = kvPairs[start:stop]
+		version := make([]byte, 8)
+		binary.LittleEndian.PutUint64(version, uint64(meta.version))
+		var memberSize int
+		var member []byte
+		for _, kvPair := range kvPairs {
+			memberSize = int(binary.LittleEndian.Uint64(kvPair.Key[len(kvPair.Key)-8:]))
+			member = kvPair.Key[len(kvPair.Key)-8-memberSize : len(kvPair.Key)-8]
+			members = append(members, member)
+		}
+		return nil
 	}
-	return true, nil
+
+	err = tx.managed(ZRangeMember)
+
+	return
+}
+
+func (tx *Transaction) ZRangeByScore(key []byte, min_score, max_score float64, isAscend bool) (members [][]byte, err error) {
+	ZRangeByScore := func() error {
+		meta, err := tx.findMetadata(key, ZSet)
+		if err != nil {
+			return err
+		}
+
+		prefix := key
+		hasPrefix := func(key, value []byte) (bool, error) {
+			_ = value
+			if !bytes.HasPrefix(prefix, key) {
+				return false, nil
+			}
+			return true, nil
+		}
+
+		var kvPairs []*KvPair
+		if isAscend {
+			kvPairs, err = tx.AscendGreaterOrEqual(key, hasPrefix)
+			if err != nil {
+				return err
+			}
+			kvPairs = kvPairs[1:]
+			sort.SliceStable(kvPairs, func(i, j int) bool {
+				return utils.BytesToFloat64(kvPairs[i].Value) < utils.BytesToFloat64(kvPairs[j].Value)
+			})
+		} else {
+			kvPairs, err = tx.DescendLessOrEqual(key, hasPrefix)
+			if err != nil {
+				return err
+			}
+			kvPairs = kvPairs[:len(kvPairs)-1]
+			sort.SliceStable(kvPairs, func(i, j int) bool {
+				return utils.BytesToFloat64(kvPairs[i].Value) > utils.BytesToFloat64(kvPairs[j].Value)
+			})
+		}
+
+		version := make([]byte, 8)
+		binary.LittleEndian.PutUint64(version, uint64(meta.version))
+		var memberSize int
+		var member []byte
+		// 为什么不先过滤在排序？
+		// 因为无法确定min和max所包含的元素数量，如果包含了全部的元素，过滤操作相当于白做
+		// 而排序后剔除，本身数组是有序的，剔除元素不会有更多额外开销
+		// 先过滤再排序，最坏情况下要多次一次for循环
+		// 先排序再过滤，最坏情况下要对全部元素进行排序
+		for _, kvPair := range kvPairs {
+			memberSize = int(binary.LittleEndian.Uint64(kvPair.Key[len(kvPair.Key)-8:]))
+			member = kvPair.Key[len(kvPair.Key)-8-memberSize : len(kvPair.Key)-8]
+			if utils.BytesToFloat64(kvPair.Value) >= min_score && utils.BytesToFloat64(kvPair.Value) <= max_score {
+				members = append(members, member)
+			}
+		}
+
+		return nil
+	}
+
+	err = tx.managed(ZRangeByScore)
+
+	return
+}
+
+// ZRank 返回有序集合中指定成员的索引
+func (tx *Transaction) ZRank(key, compareMember []byte, isAscend bool) (rn int, err error) {
+	rn = -1
+	ZRank := func() error {
+		meta, err := tx.findMetadata(key, ZSet)
+		if err != nil {
+			return err
+		}
+
+		prefix := key
+		hasPrefix := func(key, value []byte) (bool, error) {
+			_ = value
+			if !bytes.HasPrefix(prefix, key) {
+				return false, nil
+			}
+			return true, nil
+		}
+
+		var kvPairs []*KvPair
+		if isAscend {
+			kvPairs, err = tx.AscendGreaterOrEqual(key, hasPrefix)
+			if err != nil {
+				return err
+			}
+			kvPairs = kvPairs[1:]
+			sort.SliceStable(kvPairs, func(i, j int) bool {
+				return utils.BytesToFloat64(kvPairs[i].Value) < utils.BytesToFloat64(kvPairs[j].Value)
+			})
+		} else {
+			kvPairs, err = tx.DescendLessOrEqual(key, hasPrefix)
+			if err != nil {
+				return err
+			}
+			kvPairs = kvPairs[:len(kvPairs)-1]
+			sort.SliceStable(kvPairs, func(i, j int) bool {
+				return utils.BytesToFloat64(kvPairs[i].Value) > utils.BytesToFloat64(kvPairs[j].Value)
+			})
+		}
+
+		version := make([]byte, 8)
+		binary.LittleEndian.PutUint64(version, uint64(meta.version))
+		var memberSize int
+		var member []byte
+		for i, kvPair := range kvPairs {
+			memberSize = int(binary.LittleEndian.Uint64(kvPair.Key[len(kvPair.Key)-8:]))
+			member = kvPair.Key[len(kvPair.Key)-8-memberSize : len(kvPair.Key)-8]
+			if bytes.Compare(compareMember, member) == 0 {
+				rn = i
+				break
+			}
+		}
+
+		return nil
+	}
+
+	err = tx.managed(ZRank)
+
+	return
+}
+
+func (tx *Transaction) ZRem(key, member []byte) (ok bool, err error) {
+	ZRem := func() error {
+		meta, err := tx.findMetadata(key, ZSet)
+		if err != nil {
+			return err
+		}
+		if meta.size == 0 {
+			return nil
+		}
+		version := make([]byte, 8)
+		binary.LittleEndian.PutUint64(version, uint64(meta.version))
+		memberSize := make([]byte, 8)
+		binary.LittleEndian.PutUint64(memberSize, uint64(len(member)))
+		encSetKey := bytes.Join([][]byte{key, version, member, memberSize}, nil)
+
+		_, err = tx.get(encSetKey)
+		if err != nil && !errors.Is(err, ErrKeyNotFound) {
+			return err
+		}
+		if err != nil && errors.Is(err, ErrKeyNotFound) {
+			return nil
+		}
+
+		err = tx.delete(encSetKey)
+		if err != nil {
+			return err
+		}
+		meta.size--
+		err = tx.put(key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
+		if err != nil {
+			return err
+		}
+
+		ok = true
+
+		return nil
+	}
+
+	err = tx.managed(ZRem)
+
+	return
+}
+
+func (tx *Transaction) ZBatchRem(key []byte, members [][]byte) (ok bool, err error) {
+	ZBatchRem := func() error {
+		meta, err := tx.findMetadata(key, ZSet)
+		if err != nil {
+			return err
+		}
+		if meta.size == 0 {
+			return nil
+		}
+		version := make([]byte, 8)
+		binary.LittleEndian.PutUint64(version, uint64(meta.version))
+		memberSize := make([]byte, 8)
+		for _, member := range members {
+			clear(memberSize)
+			binary.LittleEndian.PutUint64(memberSize, uint64(len(member)))
+			encSetKey := bytes.Join([][]byte{key, version, member, memberSize}, nil)
+			_, err = tx.get(encSetKey)
+			if err != nil && !errors.Is(err, ErrKeyNotFound) {
+				return err
+			}
+			if err != nil && errors.Is(err, ErrKeyNotFound) {
+				return nil
+			}
+
+			err = tx.delete(encSetKey)
+			if err != nil {
+				return err
+			}
+
+			meta.size--
+		}
+
+		err = tx.put(key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
+		if err != nil {
+			return err
+		}
+
+		ok = true
+
+		return nil
+	}
+
+	err = tx.managed(ZBatchRem)
+
+	return
+}
+
+// ZRange 获取有序集合的成员数
+func (tx *Transaction) ZRemRangeByRank(key []byte, start, stop int) (count int, err error) {
+	count = -1
+	ZRemRangeByRank := func() error {
+		meta, err := tx.findMetadata(key, ZSet)
+		if err != nil {
+			return err
+		}
+
+		if meta.size == 0 {
+			return nil
+		}
+
+		prefix := key
+		hasPrefix := func(key, value []byte) (bool, error) {
+			_ = value
+			if !bytes.HasPrefix(prefix, key) {
+				return false, nil
+			}
+			return true, nil
+		}
+
+		var kvPairs []*KvPair
+		kvPairs, err = tx.AscendGreaterOrEqual(key, hasPrefix)
+		kvPairs = kvPairs[1:]
+
+		sort.SliceStable(kvPairs, func(i, j int) bool {
+			return utils.BytesToFloat64(kvPairs[i].Value) < utils.BytesToFloat64(kvPairs[j].Value)
+		})
+
+		for i, kvPair := range kvPairs {
+			if i >= start && i <= stop {
+				err = tx.delete(kvPair.Key)
+				if err != nil {
+					return err
+				}
+				meta.size--
+				count++
+			}
+		}
+
+		err = tx.put(key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
+		if err != nil {
+			return err
+		}
+
+		return nil
+	}
+
+	err = tx.managed(ZRemRangeByRank)
+
+	return
+}
+
+// ZRange 获取有序集合的成员数
+func (tx *Transaction) ZRemRangeByScore(key []byte, min_value, max_value float64) (count int, err error) {
+	count = -1
+	ZRemRangeByScore := func() error {
+		meta, err := tx.findMetadata(key, ZSet)
+		if err != nil {
+			return err
+		}
+
+		if meta.size == 0 {
+			return nil
+		}
+
+		prefix := key
+		hasPrefix := func(key, value []byte) (bool, error) {
+			_ = value
+			if !bytes.HasPrefix(prefix, key) {
+				return false, nil
+			}
+			return true, nil
+		}
+
+		kvPairs, err := tx.AscendGreaterOrEqual(key, hasPrefix)
+		kvPairs = kvPairs[1:]
+		for _, kvPair := range kvPairs {
+			if utils.BytesToFloat64(kvPair.Value) >= min_value && utils.BytesToFloat64(kvPair.Value) <= max_value {
+				err = tx.delete(kvPair.Key)
+				if err != nil {
+					return err
+				}
+				meta.size--
+				count++
+			}
+		}
+
+		err = tx.put(key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
+		if err != nil {
+			return err
+		}
+
+		return nil
+	}
+
+	err = tx.managed(ZRemRangeByScore)
+
+	return
+}
+
+func (tx *Transaction) ZScan(key []byte, cursor uint32, pattern string, count uint32) (members, values [][]byte, err error) {
+	ZScan := func() error {
+		meta, err := tx.findMetadata(key, ZSet)
+		if err != nil {
+			return err
+		}
+
+		// 这里应该返回一个ErrKeyNotFound
+		if meta.size == 0 {
+			return nil
+		}
+
+		prefix := key
+		hasPrefix := func(key, value []byte) (bool, error) {
+			_ = value
+			if !bytes.HasPrefix(prefix, key) {
+				return false, nil
+			}
+			return true, nil
+		}
+
+		kvPairs, err := tx.AscendGreaterOrEqual(key, hasPrefix)
+		kvPairs = kvPairs[1:]
+		re := regexp.MustCompile(pattern)
+		var memberSize int
+		// kvPairs[0]是元数据，需要排除掉
+		for _, kvPair := range kvPairs[cursor : cursor+count] {
+			if re.MatchString(string(kvPair.Key)) {
+				memberSize = int(binary.LittleEndian.Uint64(kvPair.Key[len(kvPair.Key)-8:]))
+				member := kvPair.Key[len(kvPair.Key)-8-memberSize : len(kvPair.Key)-8]
+				members = append(members, member)
+				values = append(values, kvPair.Value)
+			}
+		}
+
+		return nil
+	}
+
+	err = tx.managed(ZScan)
+
+	return
+}
+
+func (tx *Transaction) ZUnionStore(destination []byte, sets [][]byte) (unionSet [][]byte, err error) {
+	ZUnionStore := func() error {
+		destinationMeta, err := tx.findMetadata(destination, Set)
+		if err != nil {
+			return err
+		}
+		destinationVersion := make([]byte, 8)
+		binary.LittleEndian.PutUint64(destinationVersion, uint64(destinationMeta.version))
+
+		setMetas := make([]*metadata, len(sets))
+		temp := make(map[string]float64)
+		for i, set := range sets {
+			setMeta, err := tx.findMetadata(set, Set)
+			if err != nil {
+				return err
+			}
+			// 这里应该返回一个ErrKeyNotFound
+			if setMeta.size == 0 {
+				return nil
+			}
+			setMetas[i] = setMeta
+
+			prefix := set
+			hasPrefix := func(key, value []byte) (bool, error) {
+				_ = value
+				if !bytes.HasPrefix(prefix, key) {
+					return false, nil
+				}
+				return true, nil
+			}
+
+			kvPairs, err := tx.AscendGreaterOrEqual(set, hasPrefix)
+			var memberSizeInt int
+			memberSizeByte := make([]byte, 8)
+			var member []byte
+			for _, kvPair := range kvPairs[1:] {
+				memberSizeByte = kvPair.Key[len(kvPair.Key)-8:]
+				memberSizeInt = int(binary.LittleEndian.Uint64(memberSizeByte))
+				member = kvPair.Key[len(kvPair.Key)-8-memberSizeInt : len(kvPair.Key)-8]
+				temp[string(member)] += utils.BytesToFloat64(kvPair.Value)
+				unionSet = append(unionSet, member)
+				encSetKey := bytes.Join([][]byte{destination, destinationVersion, member, memberSizeByte}, nil)
+				err = tx.put(encSetKey, utils.Float64ToBytes(temp[string(member)]), PERSISTENT, uint64(time.Now().UnixMilli()))
+				if err != nil {
+					return err
+				}
+			}
+		}
+
+		destinationMeta.size = uint32(len(temp))
+		err = tx.put(destination, encodeMetadata(destinationMeta), PERSISTENT, uint64(time.Now().UnixMilli()))
+		if err != nil {
+			return err
+		}
+
+		return nil
+	}
+
+	err = tx.managed(ZUnionStore)
+	return
 }
 
 // Ascend 升序全局遍历
