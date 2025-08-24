@@ -19,7 +19,6 @@ package database
 import (
 	. "MechaKV/comment"
 	"MechaKV/datafile"
-	"MechaKV/index"
 	"MechaKV/utils"
 	"fmt"
 	"github.com/bwmarrin/snowflake"
@@ -70,9 +69,13 @@ func Open(options Options) (*DB, error) {
 
 	// 初始化DB实例结构体
 	mergeManager := MergeManager{isMerging: false}
-	expiryMonitor := NewExpiryMonitor()
+	expiryManager := NewExpiryManager()
 	snowflake.Epoch = options.TxEpoch
 	TxIdGenerater, err := snowflake.NewNode(0)
+	if err != nil {
+		return nil, err
+	}
+	BucketManager, err := datafile.NewBucketManager(options.DirPath)
 	if err != nil {
 		return nil, err
 	}
@@ -82,34 +85,37 @@ func Open(options Options) (*DB, error) {
 		Opts: options,
 		// 数据库锁
 		DBLock:        new(sync.RWMutex),
-		OlderFiles:    make(map[uint32]*datafile.DataFile),
-		Index:         index.NewIndexer(),
-		KeySlots:      make(map[uint16]keyPointer, 16384),
+		OldFiles:      make(map[uint32]*datafile.DataFile),
 		isInitial:     isInit,
 		fileLock:      fileLock,
 		mergeManager:  mergeManager,
-		expiryMonitor: expiryMonitor,
+		expiryManager: expiryManager,
 		TxIdGenerater: TxIdGenerater,
+		BucketManager: BucketManager,
 		KvPairHeader:  make([]byte, MaxKvPairHeaderSize),
 	}
 
+	if err = db.loadBucketFile(); err != nil {
+		return nil, err
+	}
+
 	// 加载merge目录中的数据文件
-	if err := db.loadMergedFiles(); err != nil {
+	if err = db.loadMergedFiles(); err != nil {
 		return nil, err
 	}
 
 	// 加载data目录中的数据文件
-	if err := db.loadDataFiles(); err != nil {
+	if err = db.loadDataFiles(); err != nil {
 		return nil, err
 	}
 
 	// 从 hint 索引文件中加载索引
-	if err := db.loadIndexFromHintFile(); err != nil {
+	if err = db.loadIndexFromHintFile(); err != nil {
 		return nil, err
 	}
 
 	// 从数据文件中加载索引
-	if err := db.loadIndexFromDataFiles(); err != nil {
+	if err = db.loadIndexFromDataFiles(); err != nil {
 		return nil, err
 	}
 
@@ -162,7 +168,7 @@ func (db *DB) Close() error {
 		return err
 	}
 	// 关闭历史文件
-	for _, file := range db.OlderFiles {
+	for _, file := range db.OldFiles {
 		if err := file.Close(); err != nil {
 			return err
 		}
@@ -250,7 +256,7 @@ func (db *DB) merge() error {
 		return err
 	}
 	// 将当前活跃文件转为历史数据文件
-	db.OlderFiles[db.ActiveFile.FileID] = db.ActiveFile
+	db.OldFiles[db.ActiveFile.FileID] = db.ActiveFile
 	// 打开新的活跃文件
 	// 新活跃文件不参与merge
 	if err := db.setActiveDataFile(); err != nil {
@@ -262,7 +268,7 @@ func (db *DB) merge() error {
 
 	// 取出所有需要merge的文件
 	var mergeFiles []*datafile.DataFile
-	for _, file := range db.OlderFiles {
+	for _, file := range db.OldFiles {
 		mergeFiles = append(mergeFiles, file)
 	}
 	// 释放锁，允许数据库执行其他操作
@@ -290,6 +296,7 @@ func (db *DB) merge() error {
 	// merge文件要全部历史记录成功才算成功，因此没必要每一次都落盘
 	mergeOptions.SyncWrites = false
 	mergeDB, err := Open(mergeOptions)
+
 	if err != nil {
 		return err
 	}
@@ -299,9 +306,30 @@ func (db *DB) merge() error {
 	if err != nil {
 		return err
 	}
+	//bucketFile := mergeDB.BucketManager.BucketFile
+	//// 读取文件中的索引
+	//var offset int64 = 0
+	//var bucketID uint64
+	//var bucketName string
+	//for {
+	//	kvPair, err := bucketFile.ReadKvPair(offset)
+	//	if err != nil {
+	//		if err == io.EOF {
+	//			break
+	//		}
+	//		return err
+	//	}
+	//
+	//	bucketID = utils.BytesToUint64(kvPair.Key)
+	//	bucketName = string(kvPair.Value)
+	//	mergeDB.BucketManager.BucketIDToName[bucketID] = bucketName
+	//	mergeDB.BucketManager.BucketNameToID[bucketName] = bucketID
+	//
+	//	offset += int64(kvPair.Size())
+	//}
+
 	var KvPairHeader []byte
 	var KvPairBuffers []*bytebufferpool.ByteBuffer
-
 	// 遍历处理每个数据文件
 	for _, dataFile := range mergeFiles {
 		var offset int64 = 0
@@ -318,7 +346,7 @@ func (db *DB) merge() error {
 			size := kvPair.Size()
 
 			// 获取内存索引中的数据
-			kvPairPos := db.Index.Get(kvPair.Key)
+			kvPairPos := db.Index.Get(kvPair.BucketID, kvPair.Key)
 			// 判断数据是否有效
 			// 举例该数据已经被删除，那么数据文件中至少存在一条新增记录和一条删除记录
 			// 而内存索引中，被删除的数据不存在对应记录

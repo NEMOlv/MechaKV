@@ -42,6 +42,11 @@ func UintSlice2int8Slice(ints []uint) []int8 {
 	return convertSlice(ints, func(from uint) int8 { return int8(from) })
 }
 
+func BytesToUint64(val []byte) uint64 {
+	i, _ := strconv.ParseUint(string(val), 10, 64)
+	return i
+}
+
 func BytesToFloat64(val []byte) float64 {
 	f, _ := strconv.ParseFloat(string(val), 64)
 	return f

@@ -28,21 +28,22 @@ type (
 )
 
 type Indexer interface {
-	Put(key []byte, pos *KvPairPos) *KvPairPos
-	Get(key []byte) *KvPairPos
-	Delete(key []byte) (*KvPairPos, bool)
-	Iterator(reverse bool) IndexIterator
+	Put(bucketID uint64, key []byte, pos *KvPairPos) *KvPairPos
+	Get(bucketID uint64, key []byte) *KvPairPos
+	Delete(bucketID uint64, key []byte) (*KvPairPos, bool)
+	AddBucketBTree(bucketID uint64)
+	Iterator(bucketID uint64, reverse bool) IndexIterator
 	// 索引中的数据量
-	Size() int
+	Size(bucketID uint64) int
 	// Close 关闭索引
 	Close() error
-	Iterate(iterateType IterateType, startKey, endKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos
-	Ascend(handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos
-	Descend(handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos
-	AscendRange(startKey, endKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos
-	DescendRange(startKey, endKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos
-	AscendGreaterOrEqual(startKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos
-	DescendLessOrEqual(startKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos
+	Iterate(iterateType IterateType, bucketID uint64, startKey, endKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos
+	Ascend(bucketID uint64, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos
+	Descend(bucketID uint64, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos
+	AscendRange(bucketID uint64, startKey, endKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos
+	DescendRange(bucketID uint64, startKey, endKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos
+	AscendGreaterOrEqual(bucketID uint64, startKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos
+	DescendLessOrEqual(bucketID uint64, startKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos
 }
 
 type Item struct {
@@ -54,6 +55,6 @@ func (elem1 *Item) Less(elem2 btree.Item) bool {
 	return bytes.Compare(elem1.Key, elem2.(*Item).Key) == -1
 }
 
-func NewIndexer() Indexer {
-	return NewBTree()
+func NewIndexer(bucketIDToName map[uint64]string) Indexer {
+	return NewBTree(bucketIDToName)
 }

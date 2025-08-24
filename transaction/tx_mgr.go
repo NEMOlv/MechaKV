@@ -20,6 +20,7 @@ import (
 	. "MechaKV/comment"
 	"MechaKV/database"
 	"context"
+	"errors"
 	cmap "github.com/orcaman/concurrent-map/v2"
 	"github.com/valyala/bytebufferpool"
 	"log"
@@ -63,7 +64,7 @@ func (tm *TransactionManager) Close() {
 	tm.ActiveTxs.Clear()
 }
 
-func (tm *TransactionManager) Begin(isWrite, isAutoCommit bool, options *TxOptions) (*Transaction, error) {
+func (tm *TransactionManager) BeginKV(isWrite, isAutoCommit bool, bucketNames []string, options *TxOptions) (*Transaction, error) {
 	// 如果数据库为空，提前返回
 	if tm.db == nil {
 		// 返回nil,数据库关闭错
@@ -72,6 +73,7 @@ func (tm *TransactionManager) Begin(isWrite, isAutoCommit bool, options *TxOptio
 	tx := tm.TxPool.Get().(*Transaction)
 	// 传入事务管理器
 	tx.tm = tm
+	tx.txCommitType = CommitKV
 	// 初始化待写数组
 	tx.pendingWrites = make(map[string]*KvPair)
 	// 配置当前事务是否为写事务和自动提交
@@ -80,7 +82,22 @@ func (tm *TransactionManager) Begin(isWrite, isAutoCommit bool, options *TxOptio
 	tx.options = options
 	// 初始化退出通知channel
 	tx.doneCh = make(chan struct{})
-	tm.lock(isWrite)
+	bucketIDs := make([]uint64, len(bucketNames))
+
+	for i, bucketName := range bucketNames {
+		bucketID, ok := tm.db.BucketManager.GetBucketID(bucketName)
+		if ok {
+			bucketIDs[i] = bucketID
+			tx.bucketNameToID[bucketName] = bucketID
+		} else {
+			return nil, errors.New("bucket does not exist")
+		}
+	}
+
+	for _, bucketID := range bucketIDs {
+		tm.lock(bucketID, isWrite)
+	}
+
 	// 雪花算法生成事务ID
 	tx.id = uint64(tm.db.TxIdGenerater.Generate())
 	tx.setStatusRunning()
@@ -114,19 +131,80 @@ func (tm *TransactionManager) Begin(isWrite, isAutoCommit bool, options *TxOptio
 	return tx, nil
 }
 
-func (tm *TransactionManager) Commit(tx *Transaction) (err error) {
+func (tm *TransactionManager) BeginBucket(isAutoCommit bool, options *TxOptions) (*Transaction, error) {
+	// 如果数据库为空，提前返回
+	if tm.db == nil {
+		// 返回nil,数据库关闭错
+		return nil, ErrDBClosed
+	}
+	tx := tm.TxPool.Get().(*Transaction)
+	// 传入事务管理器
+	tx.tm = tm
+	// 初始化待写数组
+	tx.pendingWrites = make(map[string]*KvPair)
+	// 配置当前事务是否为写事务和自动提交
+	tx.isWrite, tx.isAutoCommit = true, isAutoCommit
+	tx.txCommitType = CommitBucket
+	// 配置事务的配置项
+	tx.options = options
+	// 初始化退出通知channel
+	tx.doneCh = make(chan struct{})
+
+	// 雪花算法生成事务ID
+	tx.id = uint64(tm.db.TxIdGenerater.Generate())
+	tx.setStatusRunning()
+	tm.ActiveTxs.Set(strconv.FormatUint(tx.id, 10), tx)
+
+	// 每一个事务都要启动一个线程，如果短时间内启动非常多的事务，会导致性能影响
+	// 默认不启用，如果启用超时管理，则启动超时监听goroutine
+	// 启动超时监听goroutine：当ctx取消（超时）或事务正常关闭时触发
+	if options.Timeout > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), options.Timeout)
+
+		overtime := func(tx *Transaction) {
+			select {
+			case <-ctx.Done(): // 上下文取消（超时/手动取消）
+				// 尝试回滚事务，忽略"已关闭"错误（可能已手动处理）
+				if err := tm.Rollback(tx); err != nil && err != ErrCannotRollbackAClosedTx {
+					// 记录回滚失败日志（如事务已提交，回滚会失败，属于正常情况）
+					//tm.database.Logger.Printf("auto rollback tx %d failed: %v", tx.id, err)
+					println("auto rollback tx %d failed: %v", tx.id, err)
+				}
+				defer cancel()
+			case <-tx.doneCh: // 事务正常关闭（提交/回滚），无需处理
+				defer cancel()
+				return
+			}
+		}
+
+		go overtime(tx)
+	}
+
+	return tx, nil
+}
+
+func (tm *TransactionManager) Begin(txCommitType TxCommitType, isWrite, isAutoCommit bool, bucketNames []string, options *TxOptions) (*Transaction, error) {
+	if txCommitType == CommitKV {
+		return tm.BeginKV(isWrite, isAutoCommit, bucketNames, options)
+	} else if txCommitType == CommitBucket {
+		return tm.BeginBucket(isAutoCommit, options)
+	}
+	return nil, errors.New("invalid commit type")
+}
+
+func (tm *TransactionManager) CommitKV(tx *Transaction) (err error) {
 	// 事务管理器加锁，避免提交事务时，pendingWrites被修改
 	defer func() {
 		// 事务无论是否提交成功，都需要进行后清理
 		// 待写数组置空
-		for _, kvPair := range tx.pendingWrites {
-			tm.KvPairPool.Put(kvPair)
-		}
+
 		tx.pendingWrites = nil
 		// 从事务map中删除执行完毕的事务
 		tm.ActiveTxs.Remove(strconv.FormatUint(tx.id, 10))
 		tx.setStatusClosed()
-		tm.unlock(tx.isWrite)
+		for _, bucketID := range tx.bucketNameToID {
+			tm.unlock(bucketID, tx.isWrite)
+		}
 		tm.TxPool.Put(tx)
 	}()
 
@@ -187,14 +265,15 @@ func (tm *TransactionManager) Commit(tx *Transaction) (err error) {
 		var oldPos *KvPairPos
 		if kvPair.Type == KvPairPuted {
 			// 索引和插槽添加数据
-			oldPos = tm.db.Index.Put(kvPair.Key, pos)
+			oldPos = tm.db.Index.Put(kvPair.BucketID, kvPair.Key, pos)
 		} else if kvPair.Type == KvPairDeleted {
 			// 索引删除数据
-			oldPos, _ = tm.db.Index.Delete(kvPair.Key)
+			oldPos, _ = tm.db.Index.Delete(kvPair.BucketID, kvPair.Key)
 		}
 		if oldPos != nil {
 			tm.db.ReclaimSize += int64(oldPos.Size)
 		}
+		tm.KvPairPool.Put(kvPair)
 	}
 
 	// 根据配置决定是否持久化
@@ -208,13 +287,84 @@ func (tm *TransactionManager) Commit(tx *Transaction) (err error) {
 	return
 }
 
+func (tm *TransactionManager) CommitBucket(tx *Transaction) (err error) {
+	// 事务管理器加锁，避免提交事务时，pendingWrites被修改
+	defer func() {
+		// 事务无论是否提交成功，都需要进行后清理
+		// 待写数组置空
+
+		tx.pendingWrites = nil
+		// 从事务map中删除执行完毕的事务
+		tm.ActiveTxs.Remove(strconv.FormatUint(tx.id, 10))
+		tx.setStatusClosed()
+		for _, bucketID := range tx.bucketNameToID {
+			tm.unlock(bucketID, tx.isWrite)
+		}
+		tm.TxPool.Put(tx)
+	}()
+
+	// 如果事务已经关闭，返回无法提交已关闭事务的错误
+	if tx.isClosed() {
+		return ErrCannotCommitAClosedTx
+	}
+
+	// 如果数据库实例是nil
+	// 关闭当前事务，并返回数据库关闭的错误
+	if tm.db == nil {
+		tx.setStatusClosed()
+		return ErrDBClosed
+	}
+
+	// 如果pendingWrites为空直接返回
+	if len(tx.pendingWrites) == 0 {
+		return nil
+	}
+
+	// 将事务状态修改为提交中
+	tx.setStatusCommitting()
+
+	// 如果超过一批写入的大小则返回报错
+	if uint(len(tx.pendingWrites)) > tx.options.MaxBatchNum {
+		return ErrExceedMaxBatchNum
+	}
+
+	// 待写数组计数器，当cnt为0时，代表该事务的最后一条记录，为其添加TxFinished标识
+	cnt := len(tx.pendingWrites)
+	for key, pendingKvPair := range tx.pendingWrites {
+		cnt--
+		if cnt == 0 {
+			pendingKvPair.TxFinshed = TxFinished
+		}
+		err := tm.db.BucketManager.GenerateBucket(key)
+		if err != nil {
+			return err
+		}
+
+		tm.KvPairPool.Put(pendingKvPair)
+	}
+
+	close(tx.doneCh)
+	return
+}
+
+func (tm *TransactionManager) Commit(tx *Transaction) (err error) {
+	if tx.txCommitType == CommitKV {
+		return tm.CommitKV(tx)
+	} else if tx.txCommitType == CommitBucket {
+		return tm.CommitBucket(tx)
+	}
+	return errors.New("invalid commit type")
+}
+
 // Rollback 处理的是未正确关闭的事务
 func (tm *TransactionManager) Rollback(tx *Transaction) error {
 	defer func() {
 		if tx.status.Load().(TransactionStatus) == TransactionRunning {
 			// 将事务状态修改为关闭
 			tx.setStatusClosed()
-			tm.unlock(tx.isWrite)
+			for _, bucketID := range tx.bucketNameToID {
+				tm.unlock(bucketID, tx.isWrite)
+			}
 		} else {
 			// 将事务状态修改为关闭
 			tx.setStatusClosed()
@@ -248,20 +398,12 @@ func (tm *TransactionManager) Rollback(tx *Transaction) error {
 	return nil
 }
 
-// lock locks the database based on the transaction type.
-func (tm *TransactionManager) lock(isWrite bool) {
-	if isWrite {
-		tm.db.DBLock.Lock()
-	} else {
-		tm.db.DBLock.RLock()
-	}
+// lock
+func (tm *TransactionManager) lock(bucketID uint64, isWrite bool) {
+	tm.db.BucketManager.GetBucketLock(bucketID, isWrite)
 }
 
-// unlock unlocks the database based on the transaction type.
-func (tm *TransactionManager) unlock(isWrite bool) {
-	if isWrite {
-		tm.db.DBLock.Unlock()
-	} else {
-		tm.db.DBLock.RUnlock()
-	}
+// unlock
+func (tm *TransactionManager) unlock(bucketID uint64, isWrite bool) {
+	tm.db.BucketManager.ReleaseBucketLock(bucketID, isWrite)
 }

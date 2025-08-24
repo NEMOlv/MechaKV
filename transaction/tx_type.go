@@ -27,19 +27,15 @@ import (
 	"time"
 )
 
-// 遍历
-// AscendGreaterOrEqual 遍历事务中所有大于等于指定key的键值对（升序）
-// 结合事务内pendingWrites和底层索引，保证事务隔离性
-
 // string
-func (tx *Transaction) put(key, value []byte, ttl uint32, timestamp uint64) error {
+func (tx *Transaction) put(bucketID uint64, key, value []byte, ttl uint32, timestamp uint64) error {
 	if len(key) == 0 {
 		return ErrKeyIsEmpty
 	}
 
 	kvPair := tx.tm.KvPairPool.Get().(*KvPair)
 	kvPair.TxId, kvPair.Type = tx.id, KvPairPuted
-	kvPair.Key, kvPair.Value = key, value
+	kvPair.BucketID, kvPair.Key, kvPair.Value = bucketID, key, value
 	kvPair.KeySize, kvPair.ValueSize = uint32(len(key)), uint32(len(value))
 	kvPair.Timestamp, kvPair.TTL = timestamp, ttl
 
@@ -47,14 +43,14 @@ func (tx *Transaction) put(key, value []byte, ttl uint32, timestamp uint64) erro
 	return nil
 }
 
-func (tx *Transaction) delete(key []byte) error {
+func (tx *Transaction) delete(bucketID uint64, key []byte) error {
 	if len(key) == 0 {
 		return ErrKeyIsEmpty
 	}
 
 	// key不存在则直接返回
 	// 查找索引
-	if tx.tm.db.Index.Get(key) == nil {
+	if tx.tm.db.Index.Get(bucketID, key) == nil {
 		// 查找待写数组
 		if tx.pendingWrites[string(key)] == nil {
 			return ErrKeyNotFound
@@ -73,7 +69,7 @@ func (tx *Transaction) delete(key []byte) error {
 	return nil
 }
 
-func (tx *Transaction) get(key []byte) ([]byte, error) {
+func (tx *Transaction) get(bucketID uint64, key []byte) ([]byte, error) {
 	if len(key) == 0 {
 		return nil, ErrKeyIsEmpty
 	}
@@ -90,7 +86,7 @@ func (tx *Transaction) get(key []byte) ([]byte, error) {
 	}
 
 	// 从内存数据结构中取出 key 对应的索引信息
-	kvPairPos := tx.tm.db.Index.Get(key)
+	kvPairPos := tx.tm.db.Index.Get(bucketID, key)
 	// 如果key不在内存索引中，说明 key 不存在
 	if kvPairPos == nil {
 		return nil, ErrKeyNotFound
@@ -100,7 +96,7 @@ func (tx *Transaction) get(key []byte) ([]byte, error) {
 	return tx.tm.db.GetValueByPosition(kvPairPos)
 }
 
-func (tx *Transaction) getKvPair(key []byte) (*KvPair, error) {
+func (tx *Transaction) getKvPair(bucketID uint64, key []byte) (*KvPair, error) {
 	if len(key) == 0 {
 		return nil, ErrKeyIsEmpty
 	}
@@ -117,7 +113,7 @@ func (tx *Transaction) getKvPair(key []byte) (*KvPair, error) {
 	}
 
 	// 从内存数据结构中取出 key 对应的索引信息
-	kvPairPos := tx.tm.db.Index.Get(key)
+	kvPairPos := tx.tm.db.Index.Get(bucketID, key)
 	// 如果key不在内存索引中，说明 key 不存在
 	if kvPairPos == nil {
 		return nil, ErrKeyNotFound
@@ -127,16 +123,21 @@ func (tx *Transaction) getKvPair(key []byte) (*KvPair, error) {
 	return tx.tm.db.GetKvPairByPosition(kvPairPos)
 }
 
-func (tx *Transaction) Put(key, value []byte, ttl uint32, timestamp uint64, condition PutCondition) (oldValue []byte, err error) {
+func (tx *Transaction) Put(bucketName string, key, value []byte, ttl uint32, timestamp uint64, condition PutCondition) (oldValue []byte, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return nil, err
+	}
+
 	if condition == PUT_NORMAL {
 		PutNormal := func() error {
-			return tx.put(key, value, ttl, timestamp)
+			return tx.put(bucketID, key, value, ttl, timestamp)
 		}
 
 		err = tx.managed(PutNormal)
 	} else if condition == PUT_IF_NOT_EXISTS {
 		PutIfNotExists := func() error {
-			getValue, getErr := tx.get(key)
+			getValue, getErr := tx.get(bucketID, key)
 			if getErr != nil && !errors.Is(getErr, ErrKeyNotFound) {
 				return getErr
 			}
@@ -144,35 +145,35 @@ func (tx *Transaction) Put(key, value []byte, ttl uint32, timestamp uint64, cond
 			if getValue != nil {
 				return nil
 			}
-			return tx.put(key, value, ttl, timestamp)
+			return tx.put(bucketID, key, value, ttl, timestamp)
 		}
 
 		err = tx.managed(PutIfNotExists)
 	} else if condition == PUT_IF_EXISTS {
 		PutIfNotExists := func() error {
-			_, getErr := tx.get(key)
+			_, getErr := tx.get(bucketID, key)
 			if getErr != nil {
 				return getErr
 			}
-			return tx.put(key, value, ttl, timestamp)
+			return tx.put(bucketID, key, value, ttl, timestamp)
 		}
 
 		err = tx.managed(PutIfNotExists)
 	} else if condition == PUT_AND_RETURN_OLD_VALUE {
 		PutAndReturnOldValue := func() error {
 			var getErr error
-			oldValue, getErr = tx.get(key)
+			oldValue, getErr = tx.get(bucketID, key)
 			if getErr != nil && !errors.Is(getErr, ErrKeyNotFound) {
 				return getErr
 			}
-			return tx.put(key, value, ttl, timestamp)
+			return tx.put(bucketID, key, value, ttl, timestamp)
 		}
 
 		err = tx.managed(PutAndReturnOldValue)
 	} else if condition == APPEND_VALUE {
 		AppendValue := func() error {
 			var getErr error
-			oldValue, getErr = tx.get(key)
+			oldValue, getErr = tx.get(bucketID, key)
 			if getErr != nil && !errors.Is(getErr, ErrKeyNotFound) {
 				return getErr
 			}
@@ -180,17 +181,17 @@ func (tx *Transaction) Put(key, value []byte, ttl uint32, timestamp uint64, cond
 				value = append(oldValue, value...)
 			}
 
-			return tx.put(key, value, ttl, timestamp)
+			return tx.put(bucketID, key, value, ttl, timestamp)
 		}
 		err = tx.managed(AppendValue)
 	} else if condition == UPDATE_TTL {
 		UpdateTTL := func() error {
 			var getErr error
-			oldValue, getErr = tx.get(key)
+			oldValue, getErr = tx.get(bucketID, key)
 			if getErr != nil {
 				return getErr
 			}
-			return tx.put(key, oldValue, ttl, timestamp)
+			return tx.put(bucketID, key, oldValue, ttl, timestamp)
 		}
 		err = tx.managed(UpdateTTL)
 	}
@@ -201,11 +202,16 @@ func (tx *Transaction) Put(key, value []byte, ttl uint32, timestamp uint64, cond
 	return
 }
 
-func (tx *Transaction) BatchPut(key, value [][]byte, ttl uint32, timestamp uint64, condition PutCondition) (oldValue [][]byte, err error) {
+func (tx *Transaction) BatchPut(bucketName string, key, value [][]byte, ttl uint32, timestamp uint64, condition PutCondition) (oldValue [][]byte, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return nil, err
+	}
+
 	if condition == PUT_NORMAL {
 		BatchPut := func() (err error) {
 			for i := 0; i < len(key); i++ {
-				if err = tx.put(key[i], value[i], ttl, timestamp); err != nil {
+				if err = tx.put(bucketID, key[i], value[i], ttl, timestamp); err != nil {
 					return
 				}
 			}
@@ -216,7 +222,7 @@ func (tx *Transaction) BatchPut(key, value [][]byte, ttl uint32, timestamp uint6
 	} else if condition == PUT_IF_NOT_EXISTS {
 		BatchPutIfNotExists := func() (err error) {
 			for i := 0; i < len(key); i++ {
-				getValue, getErr := tx.get(key[i])
+				getValue, getErr := tx.get(bucketID, key[i])
 				if getErr != nil && !errors.Is(getErr, ErrKeyNotFound) {
 					return getErr
 				}
@@ -224,7 +230,7 @@ func (tx *Transaction) BatchPut(key, value [][]byte, ttl uint32, timestamp uint6
 				if getValue != nil {
 					return
 				}
-				if err = tx.put(key[i], value[i], ttl, timestamp); err != nil {
+				if err = tx.put(bucketID, key[i], value[i], ttl, timestamp); err != nil {
 					return
 				}
 			}
@@ -235,11 +241,11 @@ func (tx *Transaction) BatchPut(key, value [][]byte, ttl uint32, timestamp uint6
 	} else if condition == PUT_IF_EXISTS {
 		BatchPutIfExists := func() (err error) {
 			for i := 0; i < len(key); i++ {
-				_, getErr := tx.get(key[i])
+				_, getErr := tx.get(bucketID, key[i])
 				if getErr != nil {
 					return getErr
 				}
-				if err = tx.put(key[i], value[i], ttl, timestamp); err != nil {
+				if err = tx.put(bucketID, key[i], value[i], ttl, timestamp); err != nil {
 					return
 				}
 			}
@@ -252,11 +258,11 @@ func (tx *Transaction) BatchPut(key, value [][]byte, ttl uint32, timestamp uint6
 			var getErr error
 			var tempValue []byte
 			for i := 0; i < len(key); i++ {
-				tempValue, getErr = tx.get(key[i])
+				tempValue, getErr = tx.get(bucketID, key[i])
 				if getErr != nil && !errors.Is(getErr, ErrKeyNotFound) {
 					return getErr
 				}
-				if err = tx.put(key[i], value[i], ttl, timestamp); err != nil {
+				if err = tx.put(bucketID, key[i], value[i], ttl, timestamp); err != nil {
 					oldValue = nil
 					return
 				}
@@ -271,11 +277,11 @@ func (tx *Transaction) BatchPut(key, value [][]byte, ttl uint32, timestamp uint6
 			var getErr error
 			var tempValue []byte
 			for i := 0; i < len(key); i++ {
-				tempValue, getErr = tx.get(key[i])
+				tempValue, getErr = tx.get(bucketID, key[i])
 				if getErr != nil {
 					return getErr
 				}
-				if err = tx.put(key[i], tempValue, ttl, timestamp); err != nil {
+				if err = tx.put(bucketID, key[i], tempValue, ttl, timestamp); err != nil {
 					return
 				}
 			}
@@ -291,18 +297,28 @@ func (tx *Transaction) BatchPut(key, value [][]byte, ttl uint32, timestamp uint6
 	return
 }
 
-func (tx *Transaction) Delete(key []byte) (err error) {
+func (tx *Transaction) Delete(bucketName string, key []byte) (err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return err
+	}
+
 	err = tx.managed(func() (err error) {
-		err = tx.delete(key)
+		err = tx.delete(bucketID, key)
 		return err
 	})
 	return
 }
 
-func (tx *Transaction) BatchDelete(key [][]byte) (err error) {
+func (tx *Transaction) BatchDelete(bucketName string, key [][]byte) (err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return err
+	}
+
 	err = tx.managed(func() (err error) {
 		for i := 0; i < len(key); i++ {
-			if err = tx.delete(key[i]); err != nil {
+			if err = tx.delete(bucketID, key[i]); err != nil {
 				return
 			}
 		}
@@ -311,27 +327,42 @@ func (tx *Transaction) BatchDelete(key [][]byte) (err error) {
 	return
 }
 
-func (tx *Transaction) Get(key []byte) (value []byte, err error) {
+func (tx *Transaction) Get(bucketName string, key []byte) (value []byte, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return nil, err
+	}
+
 	err = tx.managed(func() (err error) {
-		value, err = tx.get(key)
+		value, err = tx.get(bucketID, key)
 		return
 	})
 	return
 }
 
-func (tx *Transaction) GetKvPair(key []byte) (kvPair *KvPair, err error) {
+func (tx *Transaction) GetKvPair(bucketName string, key []byte) (kvPair *KvPair, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return nil, err
+	}
+
 	err = tx.managed(func() (err error) {
-		kvPair, err = tx.getKvPair(key)
+		kvPair, err = tx.getKvPair(bucketID, key)
 		return
 	})
 	return
 }
 
-func (tx *Transaction) BatchGet(key [][]byte) (value [][]byte, err error) {
+func (tx *Transaction) BatchGet(bucketName string, key [][]byte) (value [][]byte, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return nil, err
+	}
+
 	err = tx.managed(func() (err error) {
 		var tempValue []byte
 		for i := 0; i < len(key); i++ {
-			if tempValue, err = tx.get(key[i]); err != nil {
+			if tempValue, err = tx.get(bucketID, key[i]); err != nil {
 				return
 			}
 			value = append(value, tempValue)
@@ -351,9 +382,9 @@ func (tx *Transaction) BatchGet(key [][]byte) (value [][]byte, err error) {
 
 // Set basedata
 // SCARD 获取集合的成员数
-func (tx *Transaction) SCARD(key []byte) (size uint32, err error) {
+func (tx *Transaction) SCARD(bucketName string, key []byte) (size uint32, err error) {
 	SCARD := func() error {
-		meta, err := tx.findMetadata(key, Set)
+		meta, err := tx.findMetadata(bucketName, key, Set)
 		if err != nil {
 			return err
 		}
@@ -374,9 +405,14 @@ func (tx *Transaction) SCARD(key []byte) (size uint32, err error) {
 }
 
 // Set put
-func (tx *Transaction) SAdd(key, member []byte) (exist bool, err error) {
+func (tx *Transaction) SAdd(bucketName string, key, member []byte) (exist bool, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return false, err
+	}
+
 	SAdd := func() error {
-		meta, err := tx.findMetadata(key, Set)
+		meta, err := tx.findMetadata(bucketName, key, Set)
 		if err != nil {
 			return err
 		}
@@ -388,18 +424,18 @@ func (tx *Transaction) SAdd(key, member []byte) (exist bool, err error) {
 		encSetKey := bytes.Join([][]byte{key, version, member, memberSize}, nil)
 
 		exist = true
-		_, err = tx.get(encSetKey)
+		_, err = tx.get(bucketID, encSetKey)
 		if err != nil && !errors.Is(err, ErrKeyNotFound) {
 			return err
 		}
 		if err != nil && errors.Is(err, ErrKeyNotFound) {
 			exist = false
 			meta.size++
-			err = tx.put(key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
+			err = tx.put(bucketID, key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
 			if err != nil {
 				return err
 			}
-			err = tx.put(encSetKey, nil, PERSISTENT, uint64(time.Now().UnixMilli()))
+			err = tx.put(bucketID, encSetKey, nil, PERSISTENT, uint64(time.Now().UnixMilli()))
 			if err != nil {
 				return err
 			}
@@ -411,9 +447,14 @@ func (tx *Transaction) SAdd(key, member []byte) (exist bool, err error) {
 	return
 }
 
-func (tx *Transaction) SBatchAdd(key []byte, members [][]byte) (exist bool, err error) {
+func (tx *Transaction) SBatchAdd(bucketName string, key []byte, members [][]byte) (exist bool, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return false, err
+	}
+
 	SAdd := func() error {
-		meta, err := tx.findMetadata(key, Set)
+		meta, err := tx.findMetadata(bucketName, key, Set)
 		if err != nil {
 			return err
 		}
@@ -426,18 +467,18 @@ func (tx *Transaction) SBatchAdd(key []byte, members [][]byte) (exist bool, err 
 			binary.LittleEndian.PutUint64(memberSize, uint64(len(member)))
 			encSetKey := bytes.Join([][]byte{key, version, member, memberSize}, nil)
 			exist = true
-			_, err = tx.get(encSetKey)
+			_, err = tx.get(bucketID, encSetKey)
 			if err != nil && !errors.Is(err, ErrKeyNotFound) {
 				return err
 			}
 			if err != nil && errors.Is(err, ErrKeyNotFound) {
 				exist = false
 				meta.size++
-				err = tx.put(key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
+				err = tx.put(bucketID, key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
 				if err != nil {
 					return err
 				}
-				err = tx.put(encSetKey, nil, PERSISTENT, uint64(time.Now().UnixMilli()))
+				err = tx.put(bucketID, encSetKey, nil, PERSISTENT, uint64(time.Now().UnixMilli()))
 				if err != nil {
 					return err
 				}
@@ -452,9 +493,14 @@ func (tx *Transaction) SBatchAdd(key []byte, members [][]byte) (exist bool, err 
 }
 
 // Set get
-func (tx *Transaction) SIsMember(key, member []byte) (exist bool, err error) {
+func (tx *Transaction) SIsMember(bucketName string, key, member []byte) (exist bool, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return false, err
+	}
+
 	SIsMember := func() error {
-		meta, err := tx.findMetadata(key, Set)
+		meta, err := tx.findMetadata(bucketName, key, Set)
 		if err != nil {
 			return err
 		}
@@ -468,7 +514,7 @@ func (tx *Transaction) SIsMember(key, member []byte) (exist bool, err error) {
 		encSetKey := bytes.Join([][]byte{key, version, member, memberSize}, nil)
 
 		exist = true
-		_, err = tx.get(encSetKey)
+		_, err = tx.get(bucketID, encSetKey)
 		if err != nil && !errors.Is(err, ErrKeyNotFound) {
 			return err
 		}
@@ -483,9 +529,14 @@ func (tx *Transaction) SIsMember(key, member []byte) (exist bool, err error) {
 	return
 }
 
-func (tx *Transaction) SMembers(key []byte) (members [][]byte, err error) {
+func (tx *Transaction) SMembers(bucketName string, key []byte) (members [][]byte, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return nil, err
+	}
+
 	SMembers := func() error {
-		meta, err := tx.findMetadata(key, Set)
+		meta, err := tx.findMetadata(bucketName, key, Set)
 		if err != nil {
 			return err
 		}
@@ -504,7 +555,7 @@ func (tx *Transaction) SMembers(key []byte) (members [][]byte, err error) {
 			return true, nil
 		}
 
-		kvPairs, err := tx.AscendGreaterOrEqual(key, hasPrefix)
+		kvPairs, err := tx.AscendGreaterOrEqual(bucketID, key, hasPrefix)
 		// kvPairs[0]是元数据，需要排除掉
 		var memberSize int
 		var member []byte
@@ -522,9 +573,14 @@ func (tx *Transaction) SMembers(key []byte) (members [][]byte, err error) {
 	return
 }
 
-func (tx *Transaction) SRandMember(key []byte, count uint32) (members [][]byte, err error) {
+func (tx *Transaction) SRandMember(bucketName string, key []byte, count uint32) (members [][]byte, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return nil, err
+	}
+
 	SRandMember := func() error {
-		meta, err := tx.findMetadata(key, Set)
+		meta, err := tx.findMetadata(bucketName, key, Set)
 		if err != nil {
 			return err
 		}
@@ -550,7 +606,7 @@ func (tx *Transaction) SRandMember(key []byte, count uint32) (members [][]byte, 
 		if err != nil {
 			return err
 		}
-		kvPairs, err := tx.AscendGreaterOrEqual(key, hasPrefix)
+		kvPairs, err := tx.AscendGreaterOrEqual(bucketID, key, hasPrefix)
 		if err != nil {
 			return err
 		}
@@ -566,9 +622,16 @@ func (tx *Transaction) SRandMember(key []byte, count uint32) (members [][]byte, 
 	return
 }
 
-func (tx *Transaction) SPop(key []byte, count uint32) (members [][]byte, err error) {
+func (tx *Transaction) SPop(bucketName string, key []byte, count uint32) (members [][]byte, err error) {
+	var bucketID uint64
+	bucketID, err = tx.getBucketID(bucketName)
+	if err != nil {
+		return nil, err
+	}
+
 	SPop := func() error {
-		meta, err := tx.findMetadata(key, Set)
+		var meta *metadata
+		meta, err = tx.findMetadata(bucketName, key, Set)
 		if err != nil {
 			return err
 		}
@@ -591,12 +654,14 @@ func (tx *Transaction) SPop(key []byte, count uint32) (members [][]byte, err err
 		var (
 			memberSize int
 			member     []byte
+			k          []int
+			kvPairs    []*KvPair
 		)
-		k, err := utils.RandomK(int(meta.size), int(count))
+		k, err = utils.RandomK(int(meta.size), int(count))
 		if err != nil {
 			return err
 		}
-		kvPairs, err := tx.AscendGreaterOrEqual(key, hasPrefix)
+		kvPairs, err = tx.AscendGreaterOrEqual(bucketID, key, hasPrefix)
 		if err != nil {
 			return err
 		}
@@ -604,7 +669,7 @@ func (tx *Transaction) SPop(key []byte, count uint32) (members [][]byte, err err
 			memberSize = int(binary.LittleEndian.Uint64(kvPairs[i].Key[len(kvPairs[i].Key)-8:]))
 			member = kvPairs[i].Key[len(kvPairs[i].Key)-8-memberSize : len(kvPairs[i].Key)-8]
 			members = append(members, member)
-			err = tx.delete(kvPairs[i].Key)
+			err = tx.delete(bucketID, kvPairs[i].Key)
 			if err != nil {
 				return err
 			}
@@ -612,9 +677,12 @@ func (tx *Transaction) SPop(key []byte, count uint32) (members [][]byte, err err
 		}
 
 		if meta.size == 0 {
-			tx.delete(key)
+			err = tx.delete(bucketID, key)
+			if err != nil {
+				return err
+			}
 		} else {
-			err = tx.put(key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
+			err = tx.put(bucketID, key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
 			if err != nil {
 				return err
 			}
@@ -626,9 +694,14 @@ func (tx *Transaction) SPop(key []byte, count uint32) (members [][]byte, err err
 	return
 }
 
-func (tx *Transaction) SRem(key, member []byte) (ok bool, err error) {
+func (tx *Transaction) SRem(bucketName string, key, member []byte) (ok bool, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return false, err
+	}
+
 	SRem := func() error {
-		meta, err := tx.findMetadata(key, Set)
+		meta, err := tx.findMetadata(bucketName, key, Set)
 		if err != nil {
 			return err
 		}
@@ -641,7 +714,7 @@ func (tx *Transaction) SRem(key, member []byte) (ok bool, err error) {
 		binary.LittleEndian.PutUint64(memberSize, uint64(len(member)))
 		encSetKey := bytes.Join([][]byte{key, version, member, memberSize}, nil)
 
-		_, err = tx.get(encSetKey)
+		_, err = tx.get(bucketID, encSetKey)
 		if err != nil && !errors.Is(err, ErrKeyNotFound) {
 
 			return err
@@ -650,13 +723,13 @@ func (tx *Transaction) SRem(key, member []byte) (ok bool, err error) {
 			return nil
 		}
 
-		err = tx.delete(encSetKey)
+		err = tx.delete(bucketID, encSetKey)
 		if err != nil {
 			return err
 		}
 
 		meta.size--
-		err = tx.put(key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
+		err = tx.put(bucketID, key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
 		if err != nil {
 			return err
 		}
@@ -671,9 +744,14 @@ func (tx *Transaction) SRem(key, member []byte) (ok bool, err error) {
 	return
 }
 
-func (tx *Transaction) SDiff(source []byte, others [][]byte) (diffSet [][]byte, err error) {
+func (tx *Transaction) SDiff(bucketName string, source []byte, others [][]byte) (diffSet [][]byte, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return nil, err
+	}
+
 	SDiff := func() error {
-		sourceMeta, err := tx.findMetadata(source, Set)
+		sourceMeta, err := tx.findMetadata(bucketName, source, Set)
 		if err != nil {
 			return err
 		}
@@ -683,7 +761,7 @@ func (tx *Transaction) SDiff(source []byte, others [][]byte) (diffSet [][]byte, 
 		}
 		otherMetas := make([]*metadata, len(others))
 		for i, otherSet := range others {
-			otherMeta, err := tx.findMetadata(otherSet, Set)
+			otherMeta, err := tx.findMetadata(bucketName, otherSet, Set)
 			if err != nil {
 				return err
 			}
@@ -703,7 +781,7 @@ func (tx *Transaction) SDiff(source []byte, others [][]byte) (diffSet [][]byte, 
 			return true, nil
 		}
 
-		kvPairs, err := tx.AscendGreaterOrEqual(source, hasPrefix)
+		kvPairs, err := tx.AscendGreaterOrEqual(bucketID, source, hasPrefix)
 		var memberSizeInt int
 		memberSizeByte := make([]byte, 8)
 		var member []byte
@@ -718,7 +796,7 @@ func (tx *Transaction) SDiff(source []byte, others [][]byte) (diffSet [][]byte, 
 				clear(version)
 				binary.LittleEndian.PutUint64(version, uint64(otherMetas[i].version))
 				encSetKey := bytes.Join([][]byte{otherSet, version, member, memberSizeByte}, nil)
-				_, err = tx.get(encSetKey)
+				_, err = tx.get(bucketID, encSetKey)
 				if err != nil && !errors.Is(err, ErrKeyNotFound) {
 					return err
 				}
@@ -738,16 +816,21 @@ func (tx *Transaction) SDiff(source []byte, others [][]byte) (diffSet [][]byte, 
 	return
 }
 
-func (tx *Transaction) SDiffStore(destination, source []byte, others [][]byte) (diffSet [][]byte, err error) {
+func (tx *Transaction) SDiffStore(bucketName string, destination, source []byte, others [][]byte) (diffSet [][]byte, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return nil, err
+	}
+
 	SDiffStore := func() error {
-		destinationMeta, err := tx.findMetadata(destination, Set)
+		destinationMeta, err := tx.findMetadata(bucketName, destination, Set)
 		if err != nil {
 			return err
 		}
 		destinationVersion := make([]byte, 8)
 		binary.LittleEndian.PutUint64(destinationVersion, uint64(destinationMeta.version))
 
-		sourceMeta, err := tx.findMetadata(source, Set)
+		sourceMeta, err := tx.findMetadata(bucketName, source, Set)
 		if err != nil {
 			return err
 		}
@@ -757,7 +840,7 @@ func (tx *Transaction) SDiffStore(destination, source []byte, others [][]byte) (
 		}
 		otherMetas := make([]*metadata, len(others))
 		for i, otherSet := range others {
-			otherMeta, err := tx.findMetadata(otherSet, Set)
+			otherMeta, err := tx.findMetadata(bucketName, otherSet, Set)
 			if err != nil {
 				return err
 			}
@@ -777,7 +860,7 @@ func (tx *Transaction) SDiffStore(destination, source []byte, others [][]byte) (
 			return true, nil
 		}
 
-		kvPairs, err := tx.AscendGreaterOrEqual(source, hasPrefix)
+		kvPairs, err := tx.AscendGreaterOrEqual(bucketID, source, hasPrefix)
 		var memberSizeInt int
 		memberSizeByte := make([]byte, 8)
 		var member []byte
@@ -792,7 +875,7 @@ func (tx *Transaction) SDiffStore(destination, source []byte, others [][]byte) (
 				clear(version)
 				binary.LittleEndian.PutUint64(version, uint64(otherMetas[i].version))
 				encSetKey := bytes.Join([][]byte{otherSet, version, member, memberSizeByte}, nil)
-				_, err = tx.get(encSetKey)
+				_, err = tx.get(bucketID, encSetKey)
 				if err != nil && !errors.Is(err, ErrKeyNotFound) {
 					return err
 				}
@@ -804,14 +887,14 @@ func (tx *Transaction) SDiffStore(destination, source []byte, others [][]byte) (
 			if isDiff {
 				diffSet = append(diffSet, member)
 				encSetKey := bytes.Join([][]byte{destination, destinationVersion, member, memberSizeByte}, nil)
-				err = tx.put(encSetKey, nil, PERSISTENT, uint64(time.Now().UnixMilli()))
+				err = tx.put(bucketID, encSetKey, nil, PERSISTENT, uint64(time.Now().UnixMilli()))
 				if err != nil {
 					return err
 				}
 				destinationMeta.size++
 			}
 		}
-		err = tx.put(encodeMetadata(destinationMeta), nil, PERSISTENT, uint64(time.Now().UnixMilli()))
+		err = tx.put(bucketID, encodeMetadata(destinationMeta), nil, PERSISTENT, uint64(time.Now().UnixMilli()))
 		if err != nil {
 			return err
 		}
@@ -822,9 +905,14 @@ func (tx *Transaction) SDiffStore(destination, source []byte, others [][]byte) (
 	return
 }
 
-func (tx *Transaction) SInter(source []byte, others [][]byte) (interSet [][]byte, err error) {
+func (tx *Transaction) SInter(bucketName string, source []byte, others [][]byte) (interSet [][]byte, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return nil, err
+	}
+
 	SInter := func() error {
-		sourceMeta, err := tx.findMetadata(source, Set)
+		sourceMeta, err := tx.findMetadata(bucketName, source, Set)
 		if err != nil {
 			return err
 		}
@@ -834,7 +922,7 @@ func (tx *Transaction) SInter(source []byte, others [][]byte) (interSet [][]byte
 		}
 		otherMetas := make([]*metadata, len(others))
 		for i, otherSet := range others {
-			otherMeta, err := tx.findMetadata(otherSet, Set)
+			otherMeta, err := tx.findMetadata(bucketName, otherSet, Set)
 			if err != nil {
 				return err
 			}
@@ -854,7 +942,7 @@ func (tx *Transaction) SInter(source []byte, others [][]byte) (interSet [][]byte
 			return true, nil
 		}
 
-		kvPairs, err := tx.AscendGreaterOrEqual(source, hasPrefix)
+		kvPairs, err := tx.AscendGreaterOrEqual(bucketID, source, hasPrefix)
 		var memberSizeInt int
 		memberSizeByte := make([]byte, 8)
 		var member []byte
@@ -869,7 +957,7 @@ func (tx *Transaction) SInter(source []byte, others [][]byte) (interSet [][]byte
 				clear(version)
 				binary.LittleEndian.PutUint64(version, uint64(otherMetas[i].version))
 				encSetKey := bytes.Join([][]byte{otherSet, version, member, memberSizeByte}, nil)
-				_, err = tx.get(encSetKey)
+				_, err = tx.get(bucketID, encSetKey)
 				if err != nil && !errors.Is(err, ErrKeyNotFound) {
 					return err
 				}
@@ -889,16 +977,21 @@ func (tx *Transaction) SInter(source []byte, others [][]byte) (interSet [][]byte
 	return
 }
 
-func (tx *Transaction) SInterStore(destination, source []byte, others [][]byte) (interSet [][]byte, err error) {
+func (tx *Transaction) SInterStore(bucketName string, destination, source []byte, others [][]byte) (interSet [][]byte, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return nil, err
+	}
+
 	SInterStore := func() error {
-		destinationMeta, err := tx.findMetadata(destination, Set)
+		destinationMeta, err := tx.findMetadata(bucketName, destination, Set)
 		if err != nil {
 			return err
 		}
 		destinationVersion := make([]byte, 8)
 		binary.LittleEndian.PutUint64(destinationVersion, uint64(destinationMeta.version))
 
-		sourceMeta, err := tx.findMetadata(source, Set)
+		sourceMeta, err := tx.findMetadata(bucketName, source, Set)
 		if err != nil {
 			return err
 		}
@@ -908,7 +1001,7 @@ func (tx *Transaction) SInterStore(destination, source []byte, others [][]byte) 
 		}
 		otherMetas := make([]*metadata, len(others))
 		for i, otherSet := range others {
-			otherMeta, err := tx.findMetadata(otherSet, Set)
+			otherMeta, err := tx.findMetadata(bucketName, otherSet, Set)
 			if err != nil {
 				return err
 			}
@@ -928,7 +1021,7 @@ func (tx *Transaction) SInterStore(destination, source []byte, others [][]byte) 
 			return true, nil
 		}
 
-		kvPairs, err := tx.AscendGreaterOrEqual(source, hasPrefix)
+		kvPairs, err := tx.AscendGreaterOrEqual(bucketID, source, hasPrefix)
 		var memberSizeInt int
 		memberSizeByte := make([]byte, 8)
 		var member []byte
@@ -943,7 +1036,7 @@ func (tx *Transaction) SInterStore(destination, source []byte, others [][]byte) 
 				clear(version)
 				binary.LittleEndian.PutUint64(version, uint64(otherMetas[i].version))
 				encSetKey := bytes.Join([][]byte{otherSet, version, member, memberSizeByte}, nil)
-				_, err = tx.get(encSetKey)
+				_, err = tx.get(bucketID, encSetKey)
 				if err != nil && !errors.Is(err, ErrKeyNotFound) {
 					return err
 				}
@@ -955,14 +1048,14 @@ func (tx *Transaction) SInterStore(destination, source []byte, others [][]byte) 
 			if isInter {
 				interSet = append(interSet, member)
 				encSetKey := bytes.Join([][]byte{destination, destinationVersion, member, memberSizeByte}, nil)
-				err = tx.put(encSetKey, nil, PERSISTENT, uint64(time.Now().UnixMilli()))
+				err = tx.put(bucketID, encSetKey, nil, PERSISTENT, uint64(time.Now().UnixMilli()))
 				if err != nil {
 					return err
 				}
 				destinationMeta.size++
 			}
 		}
-		err = tx.put(encodeMetadata(destinationMeta), nil, PERSISTENT, uint64(time.Now().UnixMilli()))
+		err = tx.put(bucketID, encodeMetadata(destinationMeta), nil, PERSISTENT, uint64(time.Now().UnixMilli()))
 		if err != nil {
 			return err
 		}
@@ -973,11 +1066,16 @@ func (tx *Transaction) SInterStore(destination, source []byte, others [][]byte) 
 	return
 }
 
-func (tx *Transaction) SUnion(sets [][]byte) (unionSet [][]byte, err error) {
+func (tx *Transaction) SUnion(bucketName string, sets [][]byte) (unionSet [][]byte, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return nil, err
+	}
+
 	SUnion := func() error {
 		setMetas := make([]*metadata, len(sets))
 		for i, set := range sets {
-			setMeta, err := tx.findMetadata(set, Set)
+			setMeta, err := tx.findMetadata(bucketName, set, Set)
 			if err != nil {
 				return err
 			}
@@ -996,7 +1094,7 @@ func (tx *Transaction) SUnion(sets [][]byte) (unionSet [][]byte, err error) {
 				return true, nil
 			}
 
-			kvPairs, err := tx.AscendGreaterOrEqual(set, hasPrefix)
+			kvPairs, err := tx.AscendGreaterOrEqual(bucketID, set, hasPrefix)
 			var memberSizeInt int
 			memberSizeByte := make([]byte, 8)
 			var member []byte
@@ -1014,9 +1112,14 @@ func (tx *Transaction) SUnion(sets [][]byte) (unionSet [][]byte, err error) {
 	return
 }
 
-func (tx *Transaction) SUnionStore(destination []byte, sets [][]byte) (unionSet [][]byte, err error) {
+func (tx *Transaction) SUnionStore(bucketName string, destination []byte, sets [][]byte) (unionSet [][]byte, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return nil, err
+	}
+
 	SUnion := func() error {
-		destinationMeta, err := tx.findMetadata(destination, Set)
+		destinationMeta, err := tx.findMetadata(bucketName, destination, Set)
 		if err != nil {
 			return err
 		}
@@ -1026,7 +1129,7 @@ func (tx *Transaction) SUnionStore(destination []byte, sets [][]byte) (unionSet 
 		setMetas := make([]*metadata, len(sets))
 		temp := make(map[string]int)
 		for i, set := range sets {
-			setMeta, err := tx.findMetadata(set, Set)
+			setMeta, err := tx.findMetadata(bucketName, set, Set)
 			if err != nil {
 				return err
 			}
@@ -1045,7 +1148,7 @@ func (tx *Transaction) SUnionStore(destination []byte, sets [][]byte) (unionSet 
 				return true, nil
 			}
 
-			kvPairs, err := tx.AscendGreaterOrEqual(set, hasPrefix)
+			kvPairs, err := tx.AscendGreaterOrEqual(bucketID, set, hasPrefix)
 			var memberSizeInt int
 			memberSizeByte := make([]byte, 8)
 			var member []byte
@@ -1056,7 +1159,7 @@ func (tx *Transaction) SUnionStore(destination []byte, sets [][]byte) (unionSet 
 				if temp[string(member)] == 0 {
 					unionSet = append(unionSet, member)
 					encSetKey := bytes.Join([][]byte{destination, destinationVersion, member, memberSizeByte}, nil)
-					err = tx.put(encSetKey, nil, PERSISTENT, uint64(time.Now().UnixMilli()))
+					err = tx.put(bucketID, encSetKey, nil, PERSISTENT, uint64(time.Now().UnixMilli()))
 					if err != nil {
 						return err
 					}
@@ -1066,7 +1169,7 @@ func (tx *Transaction) SUnionStore(destination []byte, sets [][]byte) (unionSet 
 			}
 		}
 
-		err = tx.put(destination, encodeMetadata(destinationMeta), PERSISTENT, uint64(time.Now().UnixMilli()))
+		err = tx.put(bucketID, destination, encodeMetadata(destinationMeta), PERSISTENT, uint64(time.Now().UnixMilli()))
 		if err != nil {
 			return err
 		}
@@ -1077,9 +1180,14 @@ func (tx *Transaction) SUnionStore(destination []byte, sets [][]byte) (unionSet 
 	return
 }
 
-func (tx *Transaction) SMove(source, destination []byte) (err error) {
+func (tx *Transaction) SMove(bucketName string, source, destination []byte) (err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return err
+	}
+
 	SMove := func() error {
-		sourceMeta, err := tx.findMetadata(source, Set)
+		sourceMeta, err := tx.findMetadata(bucketName, source, Set)
 		if err != nil {
 			return err
 		}
@@ -1088,7 +1196,7 @@ func (tx *Transaction) SMove(source, destination []byte) (err error) {
 			return nil
 		}
 
-		destinationMeta, err := tx.findMetadata(destination, Set)
+		destinationMeta, err := tx.findMetadata(bucketName, destination, Set)
 		if err != nil {
 			return err
 		}
@@ -1102,7 +1210,7 @@ func (tx *Transaction) SMove(source, destination []byte) (err error) {
 			return true, nil
 		}
 
-		kvPairs, err := tx.AscendGreaterOrEqual(source, hasPrefix)
+		kvPairs, err := tx.AscendGreaterOrEqual(bucketID, source, hasPrefix)
 		// kvPairs[0]是元数据，需要排除掉
 		var memberSizeInt int
 		memberSizeByte := make([]byte, 8)
@@ -1116,23 +1224,29 @@ func (tx *Transaction) SMove(source, destination []byte) (err error) {
 			member = kvPair.Key[len(kvPair.Key)-8-memberSizeInt : len(kvPair.Key)-8]
 			encSetKey := bytes.Join([][]byte{destination, version, member, memberSizeByte}, nil)
 
-			_, err = tx.get(encSetKey)
+			_, err = tx.get(bucketID, encSetKey)
 			if err != nil && !errors.Is(err, ErrKeyNotFound) {
 				return err
 			}
 
 			if err != nil && errors.Is(err, ErrKeyNotFound) {
 				destinationMeta.size++
-				err = tx.put(encSetKey, nil, PERSISTENT, uint64(time.Now().UnixMilli()))
+				err = tx.put(bucketID, encSetKey, nil, PERSISTENT, uint64(time.Now().UnixMilli()))
 				if err != nil {
 					return err
 				}
 			}
 
-			tx.delete(kvPair.Key)
+			err = tx.delete(bucketID, kvPair.Key)
+			if err != nil {
+				return err
+			}
 		}
-		tx.delete(source)
-		err = tx.put(destination, encodeMetadata(destinationMeta), PERSISTENT, uint64(time.Now().UnixMilli()))
+		err = tx.delete(bucketID, source)
+		if err != nil {
+			return err
+		}
+		err = tx.put(bucketID, destination, encodeMetadata(destinationMeta), PERSISTENT, uint64(time.Now().UnixMilli()))
 		if err != nil {
 			return err
 		}
@@ -1143,9 +1257,14 @@ func (tx *Transaction) SMove(source, destination []byte) (err error) {
 	return
 }
 
-func (tx *Transaction) SScan(key []byte, cursor uint32, pattern string, count uint32) (members [][]byte, err error) {
+func (tx *Transaction) SScan(bucketName string, key []byte, cursor uint32, pattern string, count uint32) (members [][]byte, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return nil, err
+	}
+
 	SScan := func() error {
-		meta, err := tx.findMetadata(key, Set)
+		meta, err := tx.findMetadata(bucketName, key, Set)
 		if err != nil {
 			return err
 		}
@@ -1164,7 +1283,7 @@ func (tx *Transaction) SScan(key []byte, cursor uint32, pattern string, count ui
 			return true, nil
 		}
 
-		kvPairs, err := tx.AscendGreaterOrEqual(key, hasPrefix)
+		kvPairs, err := tx.AscendGreaterOrEqual(bucketID, key, hasPrefix)
 		kvPairs = kvPairs[1:]
 		re := regexp.MustCompile(pattern)
 		var memberSize int
@@ -1194,9 +1313,9 @@ func (tx *Transaction) SScan(key []byte, cursor uint32, pattern string, count ui
 //+--------------------------------------+---------------+
 
 // hash basedata
-func (tx *Transaction) HLen(key []byte) (size uint32, err error) {
+func (tx *Transaction) HLen(bucketName string, key []byte) (size uint32, err error) {
 	HLen := func() error {
-		meta, err := tx.findMetadata(key, Hash)
+		meta, err := tx.findMetadata(bucketName, key, Hash)
 		if err != nil {
 			return err
 		}
@@ -1214,10 +1333,15 @@ func (tx *Transaction) HLen(key []byte) (size uint32, err error) {
 }
 
 // hash set
-func (tx *Transaction) HSet(key, field, value []byte) (notExist bool, err error) {
+func (tx *Transaction) HSet(bucketName string, key, field, value []byte) (notExist bool, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return false, err
+	}
+
 	HSet := func() error {
 		// 从Value中查找元数据
-		meta, err := tx.findMetadata(key, Hash)
+		meta, err := tx.findMetadata(bucketName, key, Hash)
 		if err != nil {
 			return err
 		}
@@ -1229,19 +1353,19 @@ func (tx *Transaction) HSet(key, field, value []byte) (notExist bool, err error)
 		// 构造 Hash的 SubKey
 		encHashSubKey := bytes.Join([][]byte{key, version, field, fieldSize}, nil)
 
-		if _, err = tx.get(encHashSubKey); errors.Is(err, ErrKeyNotFound) {
+		if _, err = tx.get(bucketID, encHashSubKey); errors.Is(err, ErrKeyNotFound) {
 			notExist = true
 		}
 
 		// 不存在则更新元数据
 		if notExist {
 			meta.size++
-			err = tx.put(key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
+			err = tx.put(bucketID, key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
 			if err != nil {
 				return err
 			}
 		}
-		err = tx.put(encHashSubKey, value, PERSISTENT, uint64(time.Now().UnixMilli()))
+		err = tx.put(bucketID, encHashSubKey, value, PERSISTENT, uint64(time.Now().UnixMilli()))
 		if err != nil {
 			return err
 		}
@@ -1254,10 +1378,15 @@ func (tx *Transaction) HSet(key, field, value []byte) (notExist bool, err error)
 	return
 }
 
-func (tx *Transaction) HSetIfNotExist(key, field, value []byte) (notExist bool, err error) {
+func (tx *Transaction) HSetIfNotExist(bucketName string, key, field, value []byte) (notExist bool, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return false, err
+	}
+
 	HSet := func() error {
 		// 从Value中查找元数据
-		meta, err := tx.findMetadata(key, Hash)
+		meta, err := tx.findMetadata(bucketName, key, Hash)
 		if err != nil {
 			return err
 		}
@@ -1268,19 +1397,19 @@ func (tx *Transaction) HSetIfNotExist(key, field, value []byte) (notExist bool, 
 		// 构造 Hash的 SubKey
 		encHashSubKey := bytes.Join([][]byte{key, version, field, fieldSize}, nil)
 
-		if _, err = tx.get(encHashSubKey); errors.Is(err, ErrKeyNotFound) {
+		if _, err = tx.get(bucketID, encHashSubKey); errors.Is(err, ErrKeyNotFound) {
 			notExist = true
 		}
 
 		// 不存在则更新元数据
 		if notExist {
 			meta.size++
-			err = tx.put(key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
+			err = tx.put(bucketID, key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
 			if err != nil {
 				return err
 			}
 
-			err = tx.put(encHashSubKey, value, PERSISTENT, uint64(time.Now().UnixMilli()))
+			err = tx.put(bucketID, encHashSubKey, value, PERSISTENT, uint64(time.Now().UnixMilli()))
 			if err != nil {
 				return err
 			}
@@ -1296,14 +1425,19 @@ func (tx *Transaction) HSetIfNotExist(key, field, value []byte) (notExist bool, 
 	return
 }
 
-func (tx *Transaction) HBatchSet(key []byte, fields, values [][]byte) (notExist bool, err error) {
+func (tx *Transaction) HBatchSet(bucketName string, key []byte, fields, values [][]byte) (notExist bool, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return false, err
+	}
+
 	// 返回数组不匹配错
 	if len(fields) != len(values) {
 		return false, nil
 	}
 	HBatchSet := func() error {
 		// 从Value中查找元数据
-		meta, err := tx.findMetadata(key, Hash)
+		meta, err := tx.findMetadata(bucketName, key, Hash)
 		if err != nil {
 			return err
 		}
@@ -1317,19 +1451,19 @@ func (tx *Transaction) HBatchSet(key []byte, fields, values [][]byte) (notExist 
 			// 构造 Hash的 SubKey
 			encHashSubKey := bytes.Join([][]byte{key, version, fields[i], fieldSize}, nil)
 
-			if _, err = tx.get(encHashSubKey); errors.Is(err, ErrKeyNotFound) {
+			if _, err = tx.get(bucketID, encHashSubKey); errors.Is(err, ErrKeyNotFound) {
 				notExist = true
 			}
 
 			// 不存在则更新元数据
 			if notExist {
 				meta.size++
-				err = tx.put(key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
+				err = tx.put(bucketID, key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
 				if err != nil {
 					return err
 				}
 			}
-			err = tx.put(encHashSubKey, values[i], PERSISTENT, uint64(time.Now().UnixMilli()))
+			err = tx.put(bucketID, encHashSubKey, values[i], PERSISTENT, uint64(time.Now().UnixMilli()))
 			if err != nil {
 				return err
 			}
@@ -1344,9 +1478,14 @@ func (tx *Transaction) HBatchSet(key []byte, fields, values [][]byte) (notExist 
 }
 
 // hash get
-func (tx *Transaction) HGet(key, field []byte) (value []byte, err error) {
+func (tx *Transaction) HGet(bucketName string, key, field []byte) (value []byte, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return nil, err
+	}
+
 	HGet := func() error {
-		meta, err := tx.findMetadata(key, Hash)
+		meta, err := tx.findMetadata(bucketName, key, Hash)
 		if err != nil {
 			return err
 		}
@@ -1360,7 +1499,7 @@ func (tx *Transaction) HGet(key, field []byte) (value []byte, err error) {
 		// 构造 Hash的 SubKey
 		encHashSubKey := bytes.Join([][]byte{key, version, field}, nil)
 
-		value, err = tx.get(encHashSubKey)
+		value, err = tx.get(bucketID, encHashSubKey)
 		if err != nil {
 			return err
 		}
@@ -1373,9 +1512,14 @@ func (tx *Transaction) HGet(key, field []byte) (value []byte, err error) {
 	return
 }
 
-func (tx *Transaction) HBatchGet(key []byte, fields [][]byte) (values [][]byte, err error) {
+func (tx *Transaction) HBatchGet(bucketName string, key []byte, fields [][]byte) (values [][]byte, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return nil, err
+	}
+
 	HBatchGet := func() error {
-		meta, err := tx.findMetadata(key, Hash)
+		meta, err := tx.findMetadata(bucketName, key, Hash)
 		if err != nil {
 			return err
 		}
@@ -1391,7 +1535,7 @@ func (tx *Transaction) HBatchGet(key []byte, fields [][]byte) (values [][]byte, 
 		for _, field := range fields {
 			encHashSubKey := bytes.Join([][]byte{key, version, field}, nil)
 
-			value, err := tx.get(encHashSubKey)
+			value, err := tx.get(bucketID, encHashSubKey)
 			if err != nil {
 				return err
 			}
@@ -1406,9 +1550,14 @@ func (tx *Transaction) HBatchGet(key []byte, fields [][]byte) (values [][]byte, 
 	return
 }
 
-func (tx *Transaction) HGetAll(key []byte) (fields, values [][]byte, err error) {
+func (tx *Transaction) HGetAll(bucketName string, key []byte) (fields, values [][]byte, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	HGetAll := func() error {
-		meta, err := tx.findMetadata(key, Hash)
+		meta, err := tx.findMetadata(bucketName, key, Hash)
 		if err != nil {
 			return err
 		}
@@ -1427,7 +1576,7 @@ func (tx *Transaction) HGetAll(key []byte) (fields, values [][]byte, err error) 
 			return true, nil
 		}
 
-		kvPairs, err := tx.AscendGreaterOrEqual(key, hasPrefix)
+		kvPairs, err := tx.AscendGreaterOrEqual(bucketID, key, hasPrefix)
 		var filedSize int
 		// kvPairs[0]是元数据，需要排除掉
 		for _, kvPair := range kvPairs[1:] {
@@ -1445,9 +1594,14 @@ func (tx *Transaction) HGetAll(key []byte) (fields, values [][]byte, err error) 
 	return
 }
 
-func (tx *Transaction) HKeys(key []byte) (fields [][]byte, err error) {
-	HGetAll := func() error {
-		meta, err := tx.findMetadata(key, Hash)
+func (tx *Transaction) HKeys(bucketName string, key []byte) (fields [][]byte, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return nil, err
+	}
+
+	HKeys := func() error {
+		meta, err := tx.findMetadata(bucketName, key, Hash)
 		if err != nil {
 			return err
 		}
@@ -1466,7 +1620,7 @@ func (tx *Transaction) HKeys(key []byte) (fields [][]byte, err error) {
 			return true, nil
 		}
 
-		kvPairs, err := tx.AscendGreaterOrEqual(key, hasPrefix)
+		kvPairs, err := tx.AscendGreaterOrEqual(bucketID, key, hasPrefix)
 		var filedSize int
 		// kvPairs[0]是元数据，需要排除掉
 		for _, kvPair := range kvPairs[1:] {
@@ -1478,14 +1632,19 @@ func (tx *Transaction) HKeys(key []byte) (fields [][]byte, err error) {
 		return nil
 	}
 
-	err = tx.managed(HGetAll)
+	err = tx.managed(HKeys)
 
 	return
 }
 
-func (tx *Transaction) HValues(key []byte) (values [][]byte, err error) {
-	HGetAll := func() error {
-		meta, err := tx.findMetadata(key, Hash)
+func (tx *Transaction) HValues(bucketName string, key []byte) (values [][]byte, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return nil, err
+	}
+
+	HValues := func() error {
+		meta, err := tx.findMetadata(bucketName, key, Hash)
 		if err != nil {
 			return err
 		}
@@ -1504,7 +1663,7 @@ func (tx *Transaction) HValues(key []byte) (values [][]byte, err error) {
 			return true, nil
 		}
 
-		kvPairs, err := tx.AscendGreaterOrEqual(key, hasPrefix)
+		kvPairs, err := tx.AscendGreaterOrEqual(bucketID, key, hasPrefix)
 		// kvPairs[0]是元数据，需要排除掉
 		for _, kvPair := range kvPairs[1:] {
 			values = append(values, kvPair.Value)
@@ -1513,14 +1672,19 @@ func (tx *Transaction) HValues(key []byte) (values [][]byte, err error) {
 		return nil
 	}
 
-	err = tx.managed(HGetAll)
+	err = tx.managed(HValues)
 
 	return
 }
 
-func (tx *Transaction) HScan(key []byte, cursor uint32, pattern string, count uint32) (fields, values [][]byte, err error) {
+func (tx *Transaction) HScan(bucketName string, key []byte, cursor uint32, pattern string, count uint32) (fields, values [][]byte, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	HScan := func() error {
-		meta, err := tx.findMetadata(key, Hash)
+		meta, err := tx.findMetadata(bucketName, key, Hash)
 		if err != nil {
 			return err
 		}
@@ -1539,7 +1703,7 @@ func (tx *Transaction) HScan(key []byte, cursor uint32, pattern string, count ui
 			return true, nil
 		}
 
-		kvPairs, err := tx.AscendGreaterOrEqual(key, hasPrefix)
+		kvPairs, err := tx.AscendGreaterOrEqual(bucketID, key, hasPrefix)
 		kvPairs = kvPairs[1:]
 		re := regexp.MustCompile(pattern)
 		var filedSize int
@@ -1561,9 +1725,14 @@ func (tx *Transaction) HScan(key []byte, cursor uint32, pattern string, count ui
 	return
 }
 
-func (tx *Transaction) HExists(key, field []byte) (exists bool, err error) {
-	HGet := func() error {
-		meta, err := tx.findMetadata(key, Hash)
+func (tx *Transaction) HExists(bucketName string, key, field []byte) (exists bool, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return false, err
+	}
+
+	HExists := func() error {
+		meta, err := tx.findMetadata(bucketName, key, Hash)
 		if err != nil {
 			return err
 		}
@@ -1577,7 +1746,7 @@ func (tx *Transaction) HExists(key, field []byte) (exists bool, err error) {
 		// 构造 Hash的 SubKey
 		encHashSubKey := bytes.Join([][]byte{key, version, field}, nil)
 
-		_, err = tx.get(encHashSubKey)
+		_, err = tx.get(bucketID, encHashSubKey)
 		if err != nil {
 			return err
 		}
@@ -1587,15 +1756,20 @@ func (tx *Transaction) HExists(key, field []byte) (exists bool, err error) {
 		return nil
 	}
 
-	err = tx.managed(HGet)
+	err = tx.managed(HExists)
 
 	return
 }
 
 // hash delete
-func (tx *Transaction) HDel(key, field []byte) (exist bool, err error) {
+func (tx *Transaction) HDel(bucketName string, key, field []byte) (exist bool, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return false, err
+	}
+
 	HDel := func() error {
-		meta, err := tx.findMetadata(key, Hash)
+		meta, err := tx.findMetadata(bucketName, key, Hash)
 		if err != nil {
 			return err
 		}
@@ -1610,7 +1784,7 @@ func (tx *Transaction) HDel(key, field []byte) (exist bool, err error) {
 
 		// 先查看是否存在
 		exist = true
-		_, err = tx.get(encHashSubKey)
+		_, err = tx.get(bucketID, encHashSubKey)
 		if err != nil && !errors.Is(err, ErrKeyNotFound) {
 			return err
 		}
@@ -1620,11 +1794,11 @@ func (tx *Transaction) HDel(key, field []byte) (exist bool, err error) {
 		}
 
 		meta.size--
-		err = tx.put(key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
+		err = tx.put(bucketID, key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
 		if err != nil {
 			return err
 		}
-		err = tx.delete(encHashSubKey)
+		err = tx.delete(bucketID, encHashSubKey)
 		if err != nil {
 			return err
 		}
@@ -1646,9 +1820,14 @@ func (tx *Transaction) HDel(key, field []byte) (exist bool, err error) {
 // | ListName|version|index   |     value     |
 // |   (Nbyte+8byte+8byte)    |    (N byte)   |
 // +--------------------------+---------------+
-func (tx *Transaction) push(key, value []byte, isLeft bool) (uint32, error) {
+func (tx *Transaction) push(bucketName string, key, value []byte, isLeft bool) (uint32, error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return 0, err
+	}
+
 	// 查找元数据
-	meta, err := tx.findMetadata(key, List)
+	meta, err := tx.findMetadata(bucketName, key, List)
 	if err != nil {
 		return 0, err
 	}
@@ -1672,11 +1851,11 @@ func (tx *Transaction) push(key, value []byte, isLeft bool) (uint32, error) {
 	} else {
 		meta.tail++
 	}
-	err = tx.put(key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
+	err = tx.put(bucketID, key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
 	if err != nil {
 		return 0, err
 	}
-	err = tx.put(encListKey, value, PERSISTENT, uint64(time.Now().UnixMilli()))
+	err = tx.put(bucketID, encListKey, value, PERSISTENT, uint64(time.Now().UnixMilli()))
 	if err != nil {
 		return 0, err
 	}
@@ -1684,9 +1863,14 @@ func (tx *Transaction) push(key, value []byte, isLeft bool) (uint32, error) {
 	return meta.size, nil
 }
 
-func (tx *Transaction) pop(key []byte, isLeft bool) ([]byte, error) {
+func (tx *Transaction) pop(bucketName string, key []byte, isLeft bool) ([]byte, error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return nil, err
+	}
+
 	// 查找元数据
-	meta, err := tx.findMetadata(key, List)
+	meta, err := tx.findMetadata(bucketName, key, List)
 	if err != nil {
 		return nil, err
 	}
@@ -1706,7 +1890,7 @@ func (tx *Transaction) pop(key []byte, isLeft bool) ([]byte, error) {
 	binary.LittleEndian.PutUint64(byteBuf, index)
 	encListKey := bytes.Join([][]byte{key, byteBuf}, nil)
 
-	value, err := tx.get(encListKey)
+	value, err := tx.get(bucketID, encListKey)
 	if err != nil {
 		return nil, err
 	}
@@ -1719,7 +1903,7 @@ func (tx *Transaction) pop(key []byte, isLeft bool) ([]byte, error) {
 		meta.tail--
 	}
 
-	err = tx.put(key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
+	err = tx.put(bucketID, key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
 	if err != nil {
 		return nil, err
 	}
@@ -1727,9 +1911,9 @@ func (tx *Transaction) pop(key []byte, isLeft bool) ([]byte, error) {
 	return value, nil
 }
 
-func (tx *Transaction) LPush(key, element []byte) (size uint32, err error) {
+func (tx *Transaction) LPush(bucketName string, key, element []byte) (size uint32, err error) {
 	LPush := func() error {
-		size, err = tx.push(key, element, true)
+		size, err = tx.push(bucketName, key, element, true)
 		if err != nil {
 			return err
 		}
@@ -1739,9 +1923,9 @@ func (tx *Transaction) LPush(key, element []byte) (size uint32, err error) {
 	return
 }
 
-func (tx *Transaction) RPush(key, element []byte) (size uint32, err error) {
+func (tx *Transaction) RPush(bucketName string, key, element []byte) (size uint32, err error) {
 	RPush := func() error {
-		size, err = tx.push(key, element, false)
+		size, err = tx.push(bucketName, key, element, false)
 		if err != nil {
 			return err
 		}
@@ -1751,9 +1935,9 @@ func (tx *Transaction) RPush(key, element []byte) (size uint32, err error) {
 	return
 }
 
-func (tx *Transaction) LPop(key []byte) (value []byte, err error) {
+func (tx *Transaction) LPop(bucketName string, key []byte) (value []byte, err error) {
 	LPop := func() error {
-		value, err = tx.pop(key, true)
+		value, err = tx.pop(bucketName, key, true)
 		if err != nil {
 			return err
 		}
@@ -1763,9 +1947,9 @@ func (tx *Transaction) LPop(key []byte) (value []byte, err error) {
 	return
 }
 
-func (tx *Transaction) RPop(key []byte) (value []byte, err error) {
+func (tx *Transaction) RPop(bucketName string, key []byte) (value []byte, err error) {
 	RPop := func() error {
-		value, err = tx.pop(key, false)
+		value, err = tx.pop(bucketName, key, false)
 		if err != nil {
 			return err
 		}
@@ -1776,12 +1960,11 @@ func (tx *Transaction) RPop(key []byte) (value []byte, err error) {
 }
 
 // ZSet
-
 // ZSet basedata
 // ZCard 获取有序集合的成员数
-func (tx *Transaction) ZCard(key []byte) (size uint32, err error) {
+func (tx *Transaction) ZCard(bucketName string, key []byte) (size uint32, err error) {
 	ZCard := func() error {
-		meta, err := tx.findMetadata(key, ZSet)
+		meta, err := tx.findMetadata(bucketName, key, ZSet)
 		if err != nil {
 			return err
 		}
@@ -1795,9 +1978,14 @@ func (tx *Transaction) ZCard(key []byte) (size uint32, err error) {
 }
 
 // ZCOUNT 计算在有序集合中指定区间分数的成员数
-func (tx *Transaction) ZCOUNT(key []byte, min_score, max_score float64) (size uint32, err error) {
+func (tx *Transaction) ZCOUNT(bucketName string, key []byte, min_score, max_score float64) (size uint32, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return 0, err
+	}
+
 	ZCOUNT := func() error {
-		_, err = tx.findMetadata(key, ZSet)
+		_, err = tx.findMetadata(bucketName, key, ZSet)
 		if err != nil {
 			return err
 		}
@@ -1811,7 +1999,7 @@ func (tx *Transaction) ZCOUNT(key []byte, min_score, max_score float64) (size ui
 			return true, nil
 		}
 
-		kvPairs, err := tx.AscendGreaterOrEqual(key, hasPrefix)
+		kvPairs, err := tx.AscendGreaterOrEqual(bucketID, key, hasPrefix)
 		if err != nil {
 			return err
 		}
@@ -1833,9 +2021,14 @@ func (tx *Transaction) ZCOUNT(key []byte, min_score, max_score float64) (size ui
 
 // ZSet set
 // ZAdd 向有序集合添加一个成员，或者更新已存在成员的分数
-func (tx *Transaction) ZAdd(key []byte, score float64, member []byte) (notExist bool, err error) {
+func (tx *Transaction) ZAdd(bucketName string, key []byte, score float64, member []byte) (notExist bool, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return false, err
+	}
+
 	ZAdd := func() error {
-		meta, err := tx.findMetadata(key, ZSet)
+		meta, err := tx.findMetadata(bucketName, key, ZSet)
 		if err != nil {
 			return err
 		}
@@ -1846,7 +2039,7 @@ func (tx *Transaction) ZAdd(key []byte, score float64, member []byte) (notExist 
 		binary.LittleEndian.PutUint64(memberSize, uint64(len(member)))
 		encZSetKey := bytes.Join([][]byte{key, version, member, memberSize}, nil)
 		// 查看是否已经存在
-		value, err := tx.get(encZSetKey)
+		value, err := tx.get(bucketID, encZSetKey)
 		if err != nil && !errors.Is(err, ErrKeyNotFound) {
 			return err
 		}
@@ -1861,25 +2054,25 @@ func (tx *Transaction) ZAdd(key []byte, score float64, member []byte) (notExist 
 
 		if notExist {
 			meta.size++
-			err := tx.put(key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
+			err := tx.put(bucketID, key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
 			if err != nil {
 				return err
 			}
 		}
 		if !notExist {
-			err = tx.delete(encZSetKey)
+			err = tx.delete(bucketID, encZSetKey)
 			if err != nil {
 				return err
 			}
 		}
-		err = tx.put(encZSetKey, utils.Float64ToBytes(score), PERSISTENT, uint64(time.Now().UnixMilli()))
+		err = tx.put(bucketID, encZSetKey, utils.Float64ToBytes(score), PERSISTENT, uint64(time.Now().UnixMilli()))
 		if err != nil {
 			return err
 		}
 
-		err = tx.put(encZSetKey, value, PERSISTENT, uint64(time.Now().UnixMilli()))
+		err = tx.put(bucketID, encZSetKey, value, PERSISTENT, uint64(time.Now().UnixMilli()))
 		encZSetKeyWithScore := bytes.Join([][]byte{key, version, value, member}, nil)
-		_ = tx.put(encZSetKeyWithScore, nil, PERSISTENT, uint64(time.Now().UnixMilli()))
+		_ = tx.put(bucketID, encZSetKeyWithScore, nil, PERSISTENT, uint64(time.Now().UnixMilli()))
 
 		return nil
 	}
@@ -1890,14 +2083,19 @@ func (tx *Transaction) ZAdd(key []byte, score float64, member []byte) (notExist 
 }
 
 // ZBatchAdd 向有序集合添加多个成员，或者更新已存在成员的分数
-func (tx *Transaction) ZBatchAdd(key [][]byte, score []float64, member [][]byte) (notExist bool, err error) {
+func (tx *Transaction) ZBatchAdd(bucketName string, key [][]byte, score []float64, member [][]byte) (notExist bool, err error) {
 	if len(key) != len(score) || len(key) != len(member) {
 		return false, ErrLengthNotMatch
 	}
 
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return false, err
+	}
+
 	BatchZAdd := func() error {
 		for i := 0; i < len(key); i++ {
-			meta, err := tx.findMetadata(key[i], ZSet)
+			meta, err := tx.findMetadata(bucketName, key[i], ZSet)
 			if err != nil {
 				return err
 			}
@@ -1908,7 +2106,7 @@ func (tx *Transaction) ZBatchAdd(key [][]byte, score []float64, member [][]byte)
 			binary.LittleEndian.PutUint64(memberSize, uint64(len(member[i])))
 			encZSetKey := bytes.Join([][]byte{key[i], version, member[i], memberSize}, nil)
 			// 查看是否已经存在
-			value, err := tx.get(encZSetKey)
+			value, err := tx.get(bucketID, encZSetKey)
 			if err != nil && !errors.Is(err, ErrKeyNotFound) {
 				return err
 			}
@@ -1923,25 +2121,25 @@ func (tx *Transaction) ZBatchAdd(key [][]byte, score []float64, member [][]byte)
 
 			if notExist {
 				meta.size++
-				err := tx.put(key[i], encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
+				err := tx.put(bucketID, key[i], encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
 				if err != nil {
 					return err
 				}
 			}
 			if !notExist {
-				err = tx.delete(encZSetKey)
+				err = tx.delete(bucketID, encZSetKey)
 				if err != nil {
 					return err
 				}
 			}
-			err = tx.put(encZSetKey, utils.Float64ToBytes(score[i]), PERSISTENT, uint64(time.Now().UnixMilli()))
+			err = tx.put(bucketID, encZSetKey, utils.Float64ToBytes(score[i]), PERSISTENT, uint64(time.Now().UnixMilli()))
 			if err != nil {
 				return err
 			}
 
-			err = tx.put(encZSetKey, value, PERSISTENT, uint64(time.Now().UnixMilli()))
+			err = tx.put(bucketID, encZSetKey, value, PERSISTENT, uint64(time.Now().UnixMilli()))
 			encZSetKeyWithScore := bytes.Join([][]byte{key[i], version, value, member[i]}, nil)
-			_ = tx.put(encZSetKeyWithScore, nil, PERSISTENT, uint64(time.Now().UnixMilli()))
+			_ = tx.put(bucketID, encZSetKeyWithScore, nil, PERSISTENT, uint64(time.Now().UnixMilli()))
 		}
 
 		return nil
@@ -1952,10 +2150,15 @@ func (tx *Transaction) ZBatchAdd(key [][]byte, score []float64, member [][]byte)
 	return
 }
 
-func (tx *Transaction) ZScore(key []byte, member []byte) (score float64, err error) {
+func (tx *Transaction) ZScore(bucketName string, key []byte, member []byte) (score float64, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return 0, err
+	}
+
 	score = -1
 	ZScore := func() error {
-		meta, err := tx.findMetadata(key, ZSet)
+		meta, err := tx.findMetadata(bucketName, key, ZSet)
 		if err != nil {
 			return err
 		}
@@ -1968,7 +2171,7 @@ func (tx *Transaction) ZScore(key []byte, member []byte) (score float64, err err
 		memberSize := make([]byte, 8)
 		binary.LittleEndian.PutUint64(memberSize, uint64(len(member)))
 		encZSetKey := bytes.Join([][]byte{key, version, member, memberSize}, nil)
-		value, err := tx.get(encZSetKey)
+		value, err := tx.get(bucketID, encZSetKey)
 		if err != nil {
 			return err
 		}
@@ -1982,9 +2185,14 @@ func (tx *Transaction) ZScore(key []byte, member []byte) (score float64, err err
 }
 
 // ZRange 获取有序集合的成员数
-func (tx *Transaction) ZRange(key []byte, start, stop uint32, isAscend bool) (members [][]byte, scores []float64, err error) {
+func (tx *Transaction) ZRange(bucketName string, key []byte, start, stop uint32, isAscend bool) (members [][]byte, scores []float64, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	ZRange := func() error {
-		meta, err := tx.findMetadata(key, ZSet)
+		meta, err := tx.findMetadata(bucketName, key, ZSet)
 		if err != nil {
 			return err
 		}
@@ -2000,7 +2208,7 @@ func (tx *Transaction) ZRange(key []byte, start, stop uint32, isAscend bool) (me
 
 		var kvPairs []*KvPair
 		if isAscend {
-			kvPairs, err = tx.AscendGreaterOrEqual(key, hasPrefix)
+			kvPairs, err = tx.AscendGreaterOrEqual(bucketID, key, hasPrefix)
 			if err != nil {
 				return err
 			}
@@ -2009,7 +2217,7 @@ func (tx *Transaction) ZRange(key []byte, start, stop uint32, isAscend bool) (me
 				return utils.BytesToFloat64(kvPairs[i].Value) < utils.BytesToFloat64(kvPairs[j].Value)
 			})
 		} else {
-			kvPairs, err = tx.DescendLessOrEqual(key, hasPrefix)
+			kvPairs, err = tx.DescendLessOrEqual(bucketID, key, hasPrefix)
 			if err != nil {
 				return err
 			}
@@ -2042,9 +2250,14 @@ func (tx *Transaction) ZRange(key []byte, start, stop uint32, isAscend bool) (me
 }
 
 // ZRange 获取有序集合的成员数
-func (tx *Transaction) ZRangeMember(key []byte, start, stop uint32, isAscend bool) (members [][]byte, err error) {
+func (tx *Transaction) ZRangeMember(bucketName string, key []byte, start, stop uint32, isAscend bool) (members [][]byte, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return nil, err
+	}
+
 	ZRangeMember := func() error {
-		meta, err := tx.findMetadata(key, ZSet)
+		meta, err := tx.findMetadata(bucketName, key, ZSet)
 		if err != nil {
 			return err
 		}
@@ -2060,7 +2273,7 @@ func (tx *Transaction) ZRangeMember(key []byte, start, stop uint32, isAscend boo
 
 		var kvPairs []*KvPair
 		if isAscend {
-			kvPairs, err = tx.AscendGreaterOrEqual(key, hasPrefix)
+			kvPairs, err = tx.AscendGreaterOrEqual(bucketID, key, hasPrefix)
 			if err != nil {
 				return err
 			}
@@ -2069,7 +2282,7 @@ func (tx *Transaction) ZRangeMember(key []byte, start, stop uint32, isAscend boo
 				return utils.BytesToFloat64(kvPairs[i].Value) < utils.BytesToFloat64(kvPairs[j].Value)
 			})
 		} else {
-			kvPairs, err = tx.DescendLessOrEqual(key, hasPrefix)
+			kvPairs, err = tx.DescendLessOrEqual(bucketID, key, hasPrefix)
 			if err != nil {
 				return err
 			}
@@ -2097,9 +2310,14 @@ func (tx *Transaction) ZRangeMember(key []byte, start, stop uint32, isAscend boo
 	return
 }
 
-func (tx *Transaction) ZRangeByScore(key []byte, min_score, max_score float64, isAscend bool) (members [][]byte, err error) {
+func (tx *Transaction) ZRangeByScore(bucketName string, key []byte, min_score, max_score float64, isAscend bool) (members [][]byte, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return nil, err
+	}
+
 	ZRangeByScore := func() error {
-		meta, err := tx.findMetadata(key, ZSet)
+		meta, err := tx.findMetadata(bucketName, key, ZSet)
 		if err != nil {
 			return err
 		}
@@ -2115,7 +2333,7 @@ func (tx *Transaction) ZRangeByScore(key []byte, min_score, max_score float64, i
 
 		var kvPairs []*KvPair
 		if isAscend {
-			kvPairs, err = tx.AscendGreaterOrEqual(key, hasPrefix)
+			kvPairs, err = tx.AscendGreaterOrEqual(bucketID, key, hasPrefix)
 			if err != nil {
 				return err
 			}
@@ -2124,7 +2342,7 @@ func (tx *Transaction) ZRangeByScore(key []byte, min_score, max_score float64, i
 				return utils.BytesToFloat64(kvPairs[i].Value) < utils.BytesToFloat64(kvPairs[j].Value)
 			})
 		} else {
-			kvPairs, err = tx.DescendLessOrEqual(key, hasPrefix)
+			kvPairs, err = tx.DescendLessOrEqual(bucketID, key, hasPrefix)
 			if err != nil {
 				return err
 			}
@@ -2160,10 +2378,15 @@ func (tx *Transaction) ZRangeByScore(key []byte, min_score, max_score float64, i
 }
 
 // ZRank 返回有序集合中指定成员的索引
-func (tx *Transaction) ZRank(key, compareMember []byte, isAscend bool) (rn int, err error) {
+func (tx *Transaction) ZRank(bucketName string, key, compareMember []byte, isAscend bool) (rn int, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return 0, err
+	}
+
 	rn = -1
 	ZRank := func() error {
-		meta, err := tx.findMetadata(key, ZSet)
+		meta, err := tx.findMetadata(bucketName, key, ZSet)
 		if err != nil {
 			return err
 		}
@@ -2179,7 +2402,7 @@ func (tx *Transaction) ZRank(key, compareMember []byte, isAscend bool) (rn int, 
 
 		var kvPairs []*KvPair
 		if isAscend {
-			kvPairs, err = tx.AscendGreaterOrEqual(key, hasPrefix)
+			kvPairs, err = tx.AscendGreaterOrEqual(bucketID, key, hasPrefix)
 			if err != nil {
 				return err
 			}
@@ -2188,7 +2411,7 @@ func (tx *Transaction) ZRank(key, compareMember []byte, isAscend bool) (rn int, 
 				return utils.BytesToFloat64(kvPairs[i].Value) < utils.BytesToFloat64(kvPairs[j].Value)
 			})
 		} else {
-			kvPairs, err = tx.DescendLessOrEqual(key, hasPrefix)
+			kvPairs, err = tx.DescendLessOrEqual(bucketID, key, hasPrefix)
 			if err != nil {
 				return err
 			}
@@ -2219,9 +2442,14 @@ func (tx *Transaction) ZRank(key, compareMember []byte, isAscend bool) (rn int, 
 	return
 }
 
-func (tx *Transaction) ZRem(key, member []byte) (ok bool, err error) {
+func (tx *Transaction) ZRem(bucketName string, key, member []byte) (ok bool, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return false, err
+	}
+
 	ZRem := func() error {
-		meta, err := tx.findMetadata(key, ZSet)
+		meta, err := tx.findMetadata(bucketName, key, ZSet)
 		if err != nil {
 			return err
 		}
@@ -2234,7 +2462,7 @@ func (tx *Transaction) ZRem(key, member []byte) (ok bool, err error) {
 		binary.LittleEndian.PutUint64(memberSize, uint64(len(member)))
 		encSetKey := bytes.Join([][]byte{key, version, member, memberSize}, nil)
 
-		_, err = tx.get(encSetKey)
+		_, err = tx.get(bucketID, encSetKey)
 		if err != nil && !errors.Is(err, ErrKeyNotFound) {
 			return err
 		}
@@ -2242,12 +2470,12 @@ func (tx *Transaction) ZRem(key, member []byte) (ok bool, err error) {
 			return nil
 		}
 
-		err = tx.delete(encSetKey)
+		err = tx.delete(bucketID, encSetKey)
 		if err != nil {
 			return err
 		}
 		meta.size--
-		err = tx.put(key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
+		err = tx.put(bucketID, key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
 		if err != nil {
 			return err
 		}
@@ -2262,9 +2490,14 @@ func (tx *Transaction) ZRem(key, member []byte) (ok bool, err error) {
 	return
 }
 
-func (tx *Transaction) ZBatchRem(key []byte, members [][]byte) (ok bool, err error) {
+func (tx *Transaction) ZBatchRem(bucketName string, key []byte, members [][]byte) (ok bool, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return false, err
+	}
+
 	ZBatchRem := func() error {
-		meta, err := tx.findMetadata(key, ZSet)
+		meta, err := tx.findMetadata(bucketName, key, ZSet)
 		if err != nil {
 			return err
 		}
@@ -2278,7 +2511,7 @@ func (tx *Transaction) ZBatchRem(key []byte, members [][]byte) (ok bool, err err
 			clear(memberSize)
 			binary.LittleEndian.PutUint64(memberSize, uint64(len(member)))
 			encSetKey := bytes.Join([][]byte{key, version, member, memberSize}, nil)
-			_, err = tx.get(encSetKey)
+			_, err = tx.get(bucketID, encSetKey)
 			if err != nil && !errors.Is(err, ErrKeyNotFound) {
 				return err
 			}
@@ -2286,7 +2519,7 @@ func (tx *Transaction) ZBatchRem(key []byte, members [][]byte) (ok bool, err err
 				return nil
 			}
 
-			err = tx.delete(encSetKey)
+			err = tx.delete(bucketID, encSetKey)
 			if err != nil {
 				return err
 			}
@@ -2294,7 +2527,7 @@ func (tx *Transaction) ZBatchRem(key []byte, members [][]byte) (ok bool, err err
 			meta.size--
 		}
 
-		err = tx.put(key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
+		err = tx.put(bucketID, key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
 		if err != nil {
 			return err
 		}
@@ -2310,10 +2543,15 @@ func (tx *Transaction) ZBatchRem(key []byte, members [][]byte) (ok bool, err err
 }
 
 // ZRange 获取有序集合的成员数
-func (tx *Transaction) ZRemRangeByRank(key []byte, start, stop int) (count int, err error) {
+func (tx *Transaction) ZRemRangeByRank(bucketName string, key []byte, start, stop int) (count int, err error) {
 	count = -1
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return count, err
+	}
+
 	ZRemRangeByRank := func() error {
-		meta, err := tx.findMetadata(key, ZSet)
+		meta, err := tx.findMetadata(bucketName, key, ZSet)
 		if err != nil {
 			return err
 		}
@@ -2332,7 +2570,7 @@ func (tx *Transaction) ZRemRangeByRank(key []byte, start, stop int) (count int, 
 		}
 
 		var kvPairs []*KvPair
-		kvPairs, err = tx.AscendGreaterOrEqual(key, hasPrefix)
+		kvPairs, err = tx.AscendGreaterOrEqual(bucketID, key, hasPrefix)
 		kvPairs = kvPairs[1:]
 
 		sort.SliceStable(kvPairs, func(i, j int) bool {
@@ -2341,7 +2579,7 @@ func (tx *Transaction) ZRemRangeByRank(key []byte, start, stop int) (count int, 
 
 		for i, kvPair := range kvPairs {
 			if i >= start && i <= stop {
-				err = tx.delete(kvPair.Key)
+				err = tx.delete(bucketID, kvPair.Key)
 				if err != nil {
 					return err
 				}
@@ -2350,7 +2588,7 @@ func (tx *Transaction) ZRemRangeByRank(key []byte, start, stop int) (count int, 
 			}
 		}
 
-		err = tx.put(key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
+		err = tx.put(bucketID, key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
 		if err != nil {
 			return err
 		}
@@ -2364,10 +2602,15 @@ func (tx *Transaction) ZRemRangeByRank(key []byte, start, stop int) (count int, 
 }
 
 // ZRange 获取有序集合的成员数
-func (tx *Transaction) ZRemRangeByScore(key []byte, min_value, max_value float64) (count int, err error) {
+func (tx *Transaction) ZRemRangeByScore(bucketName string, key []byte, min_value, max_value float64) (count int, err error) {
 	count = -1
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return count, err
+	}
+
 	ZRemRangeByScore := func() error {
-		meta, err := tx.findMetadata(key, ZSet)
+		meta, err := tx.findMetadata(bucketName, key, ZSet)
 		if err != nil {
 			return err
 		}
@@ -2385,11 +2628,11 @@ func (tx *Transaction) ZRemRangeByScore(key []byte, min_value, max_value float64
 			return true, nil
 		}
 
-		kvPairs, err := tx.AscendGreaterOrEqual(key, hasPrefix)
+		kvPairs, err := tx.AscendGreaterOrEqual(bucketID, key, hasPrefix)
 		kvPairs = kvPairs[1:]
 		for _, kvPair := range kvPairs {
 			if utils.BytesToFloat64(kvPair.Value) >= min_value && utils.BytesToFloat64(kvPair.Value) <= max_value {
-				err = tx.delete(kvPair.Key)
+				err = tx.delete(bucketID, kvPair.Key)
 				if err != nil {
 					return err
 				}
@@ -2398,7 +2641,7 @@ func (tx *Transaction) ZRemRangeByScore(key []byte, min_value, max_value float64
 			}
 		}
 
-		err = tx.put(key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
+		err = tx.put(bucketID, key, encodeMetadata(meta), PERSISTENT, uint64(time.Now().UnixMilli()))
 		if err != nil {
 			return err
 		}
@@ -2411,9 +2654,14 @@ func (tx *Transaction) ZRemRangeByScore(key []byte, min_value, max_value float64
 	return
 }
 
-func (tx *Transaction) ZScan(key []byte, cursor uint32, pattern string, count uint32) (members, values [][]byte, err error) {
+func (tx *Transaction) ZScan(bucketName string, key []byte, cursor uint32, pattern string, count uint32) (members, values [][]byte, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	ZScan := func() error {
-		meta, err := tx.findMetadata(key, ZSet)
+		meta, err := tx.findMetadata(bucketName, key, ZSet)
 		if err != nil {
 			return err
 		}
@@ -2432,7 +2680,7 @@ func (tx *Transaction) ZScan(key []byte, cursor uint32, pattern string, count ui
 			return true, nil
 		}
 
-		kvPairs, err := tx.AscendGreaterOrEqual(key, hasPrefix)
+		kvPairs, err := tx.AscendGreaterOrEqual(bucketID, key, hasPrefix)
 		kvPairs = kvPairs[1:]
 		re := regexp.MustCompile(pattern)
 		var memberSize int
@@ -2454,9 +2702,14 @@ func (tx *Transaction) ZScan(key []byte, cursor uint32, pattern string, count ui
 	return
 }
 
-func (tx *Transaction) ZUnionStore(destination []byte, sets [][]byte) (unionSet [][]byte, err error) {
+func (tx *Transaction) ZUnionStore(bucketName string, destination []byte, sets [][]byte) (unionSet [][]byte, err error) {
+	bucketID, err := tx.getBucketID(bucketName)
+	if err != nil {
+		return nil, err
+	}
+
 	ZUnionStore := func() error {
-		destinationMeta, err := tx.findMetadata(destination, Set)
+		destinationMeta, err := tx.findMetadata(bucketName, destination, Set)
 		if err != nil {
 			return err
 		}
@@ -2466,7 +2719,7 @@ func (tx *Transaction) ZUnionStore(destination []byte, sets [][]byte) (unionSet 
 		setMetas := make([]*metadata, len(sets))
 		temp := make(map[string]float64)
 		for i, set := range sets {
-			setMeta, err := tx.findMetadata(set, Set)
+			setMeta, err := tx.findMetadata(bucketName, set, Set)
 			if err != nil {
 				return err
 			}
@@ -2485,7 +2738,7 @@ func (tx *Transaction) ZUnionStore(destination []byte, sets [][]byte) (unionSet 
 				return true, nil
 			}
 
-			kvPairs, err := tx.AscendGreaterOrEqual(set, hasPrefix)
+			kvPairs, err := tx.AscendGreaterOrEqual(bucketID, set, hasPrefix)
 			var memberSizeInt int
 			memberSizeByte := make([]byte, 8)
 			var member []byte
@@ -2496,7 +2749,7 @@ func (tx *Transaction) ZUnionStore(destination []byte, sets [][]byte) (unionSet 
 				temp[string(member)] += utils.BytesToFloat64(kvPair.Value)
 				unionSet = append(unionSet, member)
 				encSetKey := bytes.Join([][]byte{destination, destinationVersion, member, memberSizeByte}, nil)
-				err = tx.put(encSetKey, utils.Float64ToBytes(temp[string(member)]), PERSISTENT, uint64(time.Now().UnixMilli()))
+				err = tx.put(bucketID, encSetKey, utils.Float64ToBytes(temp[string(member)]), PERSISTENT, uint64(time.Now().UnixMilli()))
 				if err != nil {
 					return err
 				}
@@ -2504,7 +2757,7 @@ func (tx *Transaction) ZUnionStore(destination []byte, sets [][]byte) (unionSet 
 		}
 
 		destinationMeta.size = uint32(len(temp))
-		err = tx.put(destination, encodeMetadata(destinationMeta), PERSISTENT, uint64(time.Now().UnixMilli()))
+		err = tx.put(bucketID, destination, encodeMetadata(destinationMeta), PERSISTENT, uint64(time.Now().UnixMilli()))
 		if err != nil {
 			return err
 		}
@@ -2517,38 +2770,38 @@ func (tx *Transaction) ZUnionStore(destination []byte, sets [][]byte) (unionSet 
 }
 
 // Ascend 升序全局遍历
-func (tx *Transaction) Ascend(handleFn func(key, value []byte) (bool, error)) ([]*KvPair, error) {
-	return tx.Iterate(Ascend, nil, nil, handleFn)
+func (tx *Transaction) Ascend(bucketID uint64, handleFn func(key, value []byte) (bool, error)) ([]*KvPair, error) {
+	return tx.Iterate(Ascend, bucketID, nil, nil, handleFn)
 }
 
 // Descend 降序全局遍历
-func (tx *Transaction) Descend(handleFn func(key, value []byte) (bool, error)) ([]*KvPair, error) {
-	return tx.Iterate(Descend, nil, nil, handleFn)
+func (tx *Transaction) Descend(bucketID uint64, handleFn func(key, value []byte) (bool, error)) ([]*KvPair, error) {
+	return tx.Iterate(Descend, bucketID, nil, nil, handleFn)
 }
 
 // AscendRange 升序范围遍历
-func (tx *Transaction) AscendRange(startKey, endKey []byte, handleFn func(key, value []byte) (bool, error)) ([]*KvPair, error) {
-	return tx.Iterate(Ascend, startKey, endKey, handleFn)
+func (tx *Transaction) AscendRange(bucketID uint64, startKey, endKey []byte, handleFn func(key, value []byte) (bool, error)) ([]*KvPair, error) {
+	return tx.Iterate(Ascend, bucketID, startKey, endKey, handleFn)
 }
 
 // DescendRange 降序范围遍历
-func (tx *Transaction) DescendRange(startKey, endKey []byte, handleFn func(key, value []byte) (bool, error)) ([]*KvPair, error) {
-	return tx.Iterate(Descend, startKey, endKey, handleFn)
+func (tx *Transaction) DescendRange(bucketID uint64, startKey, endKey []byte, handleFn func(key, value []byte) (bool, error)) ([]*KvPair, error) {
+	return tx.Iterate(Descend, bucketID, startKey, endKey, handleFn)
 }
 
 // AscendGreaterOrEqual 大于等于某个指定值升序遍历
-func (tx *Transaction) AscendGreaterOrEqual(startKey []byte, handleFn func(key []byte, value []byte) (bool, error)) ([]*KvPair, error) {
-	return tx.Iterate(Ascend, startKey, nil, handleFn)
+func (tx *Transaction) AscendGreaterOrEqual(bucketID uint64, startKey []byte, handleFn func(key []byte, value []byte) (bool, error)) ([]*KvPair, error) {
+	return tx.Iterate(Ascend, bucketID, startKey, nil, handleFn)
 }
 
 // DescendLessOrEqual 小于等于某个指定值降序遍历
-func (tx *Transaction) DescendLessOrEqual(startKey []byte, handleFn func(key, value []byte) (bool, error)) ([]*KvPair, error) {
-	return tx.Iterate(Descend, startKey, nil, handleFn)
+func (tx *Transaction) DescendLessOrEqual(bucketID uint64, startKey []byte, handleFn func(key, value []byte) (bool, error)) ([]*KvPair, error) {
+	return tx.Iterate(Descend, bucketID, startKey, nil, handleFn)
 }
 
 // 返回的是无序数据
 // 存储开销低，执行开销低
-func (tx *Transaction) IterateUnordered(startKey, endKey []byte, handleFn func(key, value []byte) (bool, error)) ([]*KvPair, error) {
+func (tx *Transaction) IterateUnordered(bucketID uint64, startKey, endKey []byte, handleFn func(key, value []byte) (bool, error)) ([]*KvPair, error) {
 	if tx.isClosed() {
 		return nil, ErrTxClosed
 	}
@@ -2557,7 +2810,7 @@ func (tx *Transaction) IterateUnordered(startKey, endKey []byte, handleFn func(k
 	KvPairInPendingWrites := make(map[string][]byte)
 	for key, pendingKvPair := range tx.pendingWrites {
 		// 筛选出大于等于目标key且未被删除的键
-		if bytes.Compare([]byte(key), startKey) >= 0 && pendingKvPair.Type != KvPairDeleted {
+		if startKey != nil && bytes.Compare([]byte(key), startKey) >= 0 && pendingKvPair.Type != KvPairDeleted {
 			KvPairInPendingWrites[key] = pendingKvPair.Value
 		}
 	}
@@ -2592,7 +2845,7 @@ func (tx *Transaction) IterateUnordered(startKey, endKey []byte, handleFn func(k
 		return ok, nil
 	}
 
-	tx.tm.db.Index.Iterate(Ascend, startKey, endKey, internalHandleFn)
+	tx.tm.db.Index.Iterate(Ascend, bucketID, startKey, endKey, internalHandleFn)
 
 	for key, value := range KvPairInPendingWrites {
 		ok, err := handleFn([]byte(key), value)
@@ -2613,7 +2866,7 @@ func (tx *Transaction) IterateUnordered(startKey, endKey []byte, handleFn func(k
 
 // 返回有序数据
 // 存储开销低，执行开销高
-func (tx *Transaction) Iterate(iterateType IterateType, startKey, endKey []byte, handleFn func(key, value []byte) (bool, error)) ([]*KvPair, error) {
+func (tx *Transaction) Iterate(iterateType IterateType, bucketID uint64, startKey, endKey []byte, handleFn func(key, value []byte) (bool, error)) ([]*KvPair, error) {
 	if tx.isClosed() {
 		return nil, ErrTxClosed
 	}
@@ -2623,14 +2876,14 @@ func (tx *Transaction) Iterate(iterateType IterateType, startKey, endKey []byte,
 	if iterateType == Ascend {
 		for key, pendingKvPair := range tx.pendingWrites {
 			// 筛选出大于等于目标key且未被删除的键
-			if bytes.Compare([]byte(key), startKey) >= 0 && pendingKvPair.Type != KvPairDeleted {
+			if startKey != nil && bytes.Compare([]byte(key), startKey) >= 0 && pendingKvPair.Type != KvPairDeleted {
 				KvPairInPendingWrites[key] = pendingKvPair.Value
 			}
 		}
 	} else if iterateType == Descend {
 		for key, pendingKvPair := range tx.pendingWrites {
 			// 筛选出大于等于目标key且未被删除的键
-			if bytes.Compare([]byte(key), startKey) <= 0 && pendingKvPair.Type != KvPairDeleted {
+			if startKey != nil && bytes.Compare([]byte(key), startKey) <= 0 && pendingKvPair.Type != KvPairDeleted {
 				KvPairInPendingWrites[key] = pendingKvPair.Value
 			}
 		}
@@ -2666,7 +2919,7 @@ func (tx *Transaction) Iterate(iterateType IterateType, startKey, endKey []byte,
 		return ok, nil
 	}
 
-	tx.tm.db.Index.Iterate(Ascend, startKey, endKey, internalHandleFn)
+	tx.tm.db.Index.Iterate(Ascend, bucketID, startKey, endKey, internalHandleFn)
 
 	for key, value := range KvPairInPendingWrites {
 		key := []byte(key)

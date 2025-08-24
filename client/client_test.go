@@ -78,6 +78,7 @@ func TestOpenAndCloseClient(t *testing.T) {
 func Test_Put_Normal(t *testing.T) {
 	// 启动与关闭
 	db, cli := fastOpen()
+
 	defer func() {
 		_ = cli.Close()
 		_ = db.Close()

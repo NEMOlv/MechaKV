@@ -21,7 +21,7 @@ import (
 	"math"
 )
 
-const MaxKvPairHeaderSize int64 = 4 + 1 + 1 + binary.MaxVarintLen64*2 + binary.MaxVarintLen32*3
+const MaxKvPairHeaderSize int64 = 4 + 1 + 1 + binary.MaxVarintLen64*3 + binary.MaxVarintLen32*3
 
 const (
 	MergeDirName     = "-merge"
@@ -99,4 +99,11 @@ type IterateType = byte
 const (
 	Ascend IterateType = iota
 	Descend
+)
+
+type TxCommitType byte
+
+const (
+	CommitKV TxCommitType = iota
+	CommitBucket
 )

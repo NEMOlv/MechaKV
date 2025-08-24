@@ -64,9 +64,8 @@ func decodeMetadata(buf []byte) *metadata {
 	}
 }
 
-func (tx *Transaction) findMetadata(key []byte, dataType RedisDataType) (*metadata, error) {
-	metaBuf, err := tx.Get(key)
-
+func (tx *Transaction) findMetadata(bucketName string, key []byte, dataType RedisDataType) (*metadata, error) {
+	metaBuf, err := tx.Get(bucketName, key)
 	if err != nil && !errors.Is(err, ErrKeyNotFound) {
 		return nil, err
 	}

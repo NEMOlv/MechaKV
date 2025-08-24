@@ -14,12 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// todo 这一块得思考重写逻辑
+
 package database
 
 import (
 	. "MechaKV/comment"
 	"MechaKV/datafile"
 	"MechaKV/index"
+	"MechaKV/utils"
 	"bytes"
 	"fmt"
 	"github.com/bwmarrin/snowflake"
@@ -39,11 +42,12 @@ import (
 	"github.com/robfig/cron/v3"
 )
 
+// keyPointer [][]byte
 type (
-	keyPointer [][]byte
-	KvPair     = datafile.KvPair
-	KvPairPos  = datafile.KvPairPos
-	DataFile   = datafile.DataFile
+	KvPair       = datafile.KvPair
+	KvPairPos    = datafile.KvPairPos
+	KvPairExpire = datafile.KvPairExpire
+	DataFile     = datafile.DataFile
 )
 
 type MergeManager struct {
@@ -74,23 +78,80 @@ type DB struct {
 	// 活跃数据文件：用于读写
 	ActiveFile *DataFile
 	// 旧数据文件：只用于读
-	OlderFiles map[uint32]*DataFile
-	// 表示有多少数据是无效的
-	ReclaimSize int64
+	OldFiles map[uint32]*DataFile
 	// 合并管理器
 	mergeManager MergeManager
-	// 过期器
-	expiryMonitor *ExpiryMonitor
+	// 过期管理器
+	expiryManager *ExpiryManager
+	// TxID生成器
+	TxIdGenerater *snowflake.Node
+	// 桶管理器
+	BucketManager *datafile.BucketManager
+	// 库级锁的header，之后要改成表级锁的header
+	KvPairHeader []byte
 	// 表示数据库是否初始化
 	isInitial bool
 	// 累计写入N字节数据
 	bytesWrite uint
-	// 过期插槽
-	KeySlots map[uint16]keyPointer
-	// ID生成器
-	TxIdGenerater *snowflake.Node
-	// 库级锁的header，之后要改成表级锁的header
-	KvPairHeader []byte
+	// 表示有多少数据是无效的
+	ReclaimSize int64
+}
+
+// 加载Bucket文件
+func (db *DB) loadBucketFile() error {
+	// 获取数据目录中的所有文件
+	dirFiles, err := os.ReadDir(db.Opts.DirPath)
+	if err != nil {
+		return err
+	}
+
+	// 遍历数据目录中的所有文件，找到所有以.data结尾的文件
+	var fileIds []uint32
+	for _, entry := range dirFiles {
+		if strings.HasPrefix(entry.Name(), datafile.BucketFileName) {
+			fileName := strings.Split(entry.Name(), "-")[1]
+			// 将字符串转为数字
+			fileId, err := strconv.Atoi(fileName)
+			if err != nil {
+				return ErrDataDirectoryCorrupt
+			}
+
+			fileIds = append(fileIds, uint32(fileId))
+		}
+	}
+
+	// 遍历每个数据文件id，打开对应的数据文件
+	for _, fileId := range fileIds {
+		bucketFile, err := datafile.OpenBucketFile(db.Opts.DirPath, fileId)
+		if err != nil {
+			return err
+		}
+		// 读取文件中的索引
+		var offset int64 = 0
+		var bucketID uint64
+		var bucketName string
+
+		for {
+			kvPair, err := bucketFile.ReadKvPair(offset)
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				return err
+			}
+
+			bucketID = utils.BytesToUint64(kvPair.Key)
+			bucketName = string(kvPair.Value)
+			db.BucketManager.BucketIDToName[bucketID] = bucketName
+			db.BucketManager.BucketNameToID[bucketName] = bucketID
+
+			offset += int64(kvPair.Size())
+		}
+	}
+
+	db.Index = index.NewIndexer(db.BucketManager.BucketIDToName)
+
+	return nil
 }
 
 // getNotMergeDatafileID 获取没有进行合并的DatafileID
@@ -232,7 +293,7 @@ func (db *DB) loadDataFiles() error {
 		if i == len(fileIds)-1 {
 			db.ActiveFile = dataFile
 		} else {
-			db.OlderFiles[fileId] = dataFile
+			db.OldFiles[fileId] = dataFile
 		}
 	}
 
@@ -269,7 +330,7 @@ func (db *DB) loadIndexFromHintFile() error {
 
 		// 解码拿到实际的位置索引
 		kvPairPos := datafile.DecodeKvPairPos(kvPair.Value)
-		db.Index.Put(kvPair.Key, kvPairPos)
+		db.Index.Put(kvPair.BucketID, kvPair.Key, kvPairPos)
 		offset += int64(kvPair.Size())
 	}
 
@@ -318,7 +379,7 @@ func (db *DB) loadIndexFromDataFiles() error {
 		if fileId == db.ActiveFile.FileID {
 			dataFile = db.ActiveFile
 		} else {
-			dataFile = db.OlderFiles[fileId]
+			dataFile = db.OldFiles[fileId]
 		}
 
 		for {
@@ -347,10 +408,10 @@ func (db *DB) loadIndexFromDataFiles() error {
 				for _, kvPairdPos := range TxMap[kvPair.TxId] {
 					var oldPos *KvPairPos
 					if kvPairdPos.Type == KvPairDeleted {
-						oldPos, _ = db.Index.Delete(kvPairdPos.Key)
+						oldPos, _ = db.Index.Delete(kvPair.BucketID, kvPairdPos.Key)
 						db.ReclaimSize += int64(kvPairdPos.Size)
 					} else {
-						oldPos = db.Index.Put(kvPairdPos.Key, kvPairdPos)
+						oldPos = db.Index.Put(kvPair.BucketID, kvPairdPos.Key, kvPairdPos)
 					}
 					if oldPos != nil {
 						db.ReclaimSize += int64(oldPos.Size)
@@ -409,7 +470,7 @@ func (db *DB) AppendKvPair(kvPair *KvPair, KvPairHeader []byte, KvPairBuffer *by
 		}
 
 		// 将当前活跃文件转换为旧的数据文件
-		db.OlderFiles[db.ActiveFile.FileID] = db.ActiveFile
+		db.OldFiles[db.ActiveFile.FileID] = db.ActiveFile
 
 		// 打开新的数据文件
 		if err := db.setActiveDataFile(); err != nil {
@@ -439,21 +500,24 @@ func (db *DB) AppendKvPair(kvPair *KvPair, KvPairHeader []byte, KvPairBuffer *by
 		}
 	}
 
-	table := crc16.MakeTable(crc16.CRC16_MODBUS)
-	// 计算key的crc，将其映射至不同的slot里
-	keyCrc := crc16.Checksum(kvPair.Key, table)
-	slot := keyCrc % 16384
-	if kvPair.Type == KvPairPuted {
-		db.KeySlots[slot] = append(db.KeySlots[slot], kvPair.Key)
-	} else if kvPair.Type == KvPairDeleted {
-		for idx, deleteKey := range db.KeySlots[slot] {
-			if bytes.Equal(kvPair.Key, deleteKey) {
-				db.KeySlots[slot] = append(db.KeySlots[slot][:idx], db.KeySlots[slot][idx+1:]...)
-				break
+	if kvPair.TTL != PERSISTENT {
+		table := crc16.MakeTable(crc16.CRC16_MODBUS)
+		// 计算key的crc，将其映射至不同的slot里
+		keyCrc := crc16.Checksum(kvPair.Key, table)
+		slot := keyCrc % 16384
+		if kvPair.Type == KvPairPuted {
+			kvPairExpire := db.expiryManager.KvPairExpirePool.Get().(*KvPairExpire)
+			db.expiryManager.KeySlots[slot] = append(db.expiryManager.KeySlots[slot], kvPairExpire)
+		} else if kvPair.Type == KvPairDeleted {
+			for idx, deleteKvPair := range db.expiryManager.KeySlots[slot] {
+				if bytes.Equal(kvPair.Key, deleteKvPair.Key) {
+					db.expiryManager.KvPairExpirePool.Put(db.expiryManager.KeySlots[slot][idx])
+					db.expiryManager.KeySlots[slot] = append(db.expiryManager.KeySlots[slot][:idx], db.expiryManager.KeySlots[slot][idx+1:]...)
+					break
+				}
 			}
 		}
 	}
-
 	return &pos, nil
 }
 
@@ -470,7 +534,7 @@ func (db *DB) GetValueByPosition(kvPairPos *KvPairPos) ([]byte, error) {
 	if kvPair.IsExpired() {
 		expireTime := time.UnixMilli(int64(kvPair.Timestamp))
 		expireTime = expireTime.Add(time.Duration(kvPair.TTL) * time.Second)
-		db.Index.Delete(kvPair.Key)
+		db.Index.Delete(kvPair.BucketID, kvPair.Key)
 		return nil, ErrKeyNotFound
 	}
 
@@ -483,7 +547,7 @@ func (db *DB) GetKvPairByPosition(kvPairPos *KvPairPos) (*KvPair, error) {
 	if db.ActiveFile.FileID == kvPairPos.Fid {
 		dataFile = db.ActiveFile
 	} else {
-		dataFile = db.OlderFiles[kvPairPos.Fid]
+		dataFile = db.OldFiles[kvPairPos.Fid]
 	}
 
 	// 数据文件为空
@@ -503,3 +567,25 @@ func (db *DB) GetKvPairByPosition(kvPairPos *KvPairPos) (*KvPair, error) {
 
 	return kvPair, nil
 }
+
+func (db *DB) GenerateBucket(bucketName string) (err error) {
+	err = db.BucketManager.GenerateBucket(bucketName)
+	if err != nil {
+		return err
+	}
+
+	bucketID, _ := db.BucketManager.GetBucketID(bucketName)
+
+	db.BucketManager.BucketLock[bucketID] = datafile.NewBucketLockItem()
+	return
+}
+
+//func (db *DB) DeleteBucket(bucketName string) (err error) {
+//	bucketID, ok := db.BucketManager.GetBucketID(bucketName)
+//	if !ok {
+//		return errors.New("Bucket Not Found")
+//	}
+//
+//	db.DBLock[bucketID].
+//	return
+//}

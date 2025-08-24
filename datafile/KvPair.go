@@ -27,12 +27,18 @@ import (
 
 // 数据文件中数据的组织模式
 
-//+--------+--------+------+---------+-----------+--------+----------+------------+--------+--------+
-//| crc    | status | type | tx id   | timestamp | TTL    | key size | value size | key    | value  |
-//+--------+--------+------+---------+-----------+--------+----------+------------+--------+--------+
-//| []byte | byte   | byte | unit64  | unit64    | uint32 | uint32   | uint32     | []byte | []byte |
-//| 4      | 1      | 1    | max(10) | max(10)   | max(5) | max(5)   | max(5)     | ksz    | vsz    |
-//+--------+--------+------+---------+-----------+--------+----------+------------+--------+--------+
+//+--------+--------+------+---------+----------+-----------+--------+------------+------------+--------+--------+
+//| crc    | status | type |  TxID   | BucketID | timestamp |  TTL   |   key size | value size | key    | value  |
+//+--------+--------+------+---------+----------+-----------+--------+------------+------------+--------+--------+
+//| []byte | byte   | byte | unit64  |  unit64  | unit64    | uint32 |   uint32   |   uint32   | []byte | []byte |
+//| 4      | 1      | 1    | max(10) |  max(10) | max(10)   | max(5) |   max(5)   |   max(5)   | ksz    | vsz    |
+//+--------+--------+------+---------+----------+-----------+--------+------------+------------+--------+--------+
+
+// KvPairExpire 过期KvPair索引，描述具有生命周期且参与主动过期策略的KvPair
+type KvPairExpire struct {
+	BucketID uint64
+	Key      []byte
+}
 
 // KvPairPos 数据内存索引，描述数据在磁盘上的位置
 type KvPairPos struct {
@@ -58,9 +64,10 @@ func NewKvPairPos(fid uint32, offset int64, size uint32) KvPairPos {
 type KvPair struct {
 	// header
 	Crc        uint32
-	TxFinshed  KvPairType
 	Type       KvPairType
 	TxId       uint64
+	BucketID   uint64
+	TxFinshed  KvPairType
 	Timestamp  uint64
 	TTL        uint32
 	KeySize    uint32
@@ -97,6 +104,7 @@ func (kvPair *KvPair) EncodeKvPair(header []byte, KvPairBuffer *bytebufferpool.B
 	// 5字节之后，存储的是TxID、Timestamp、TTL、ksz、vsz
 	// 使用变长类型，节省空间
 	index += binary.PutUvarint(header[index:], kvPair.TxId)
+	index += binary.PutUvarint(header[index:], kvPair.BucketID)
 	index += binary.PutUvarint(header[index:], kvPair.Timestamp)
 	index += binary.PutUvarint(header[index:], uint64(kvPair.TTL))
 	index += binary.PutUvarint(header[index:], uint64(kvPair.KeySize))
@@ -141,8 +149,12 @@ func (kvPair *KvPair) DecodeKvPairHeader(buf []byte) {
 		index++
 	}
 
-	// batch id
+	// TxID
 	txId, n := binary.Uvarint(buf[index:])
+	index += uint32(n)
+
+	// BucketID
+	bucketID, n := binary.Uvarint(buf[index:])
 	index += uint32(n)
 
 	// timestamp
@@ -168,6 +180,7 @@ func (kvPair *KvPair) DecodeKvPairHeader(buf []byte) {
 	kvPair.TxId = txId
 	kvPair.Timestamp = timestamp
 	kvPair.TTL = uint32(ttl)
+	kvPair.BucketID = bucketID
 	kvPair.KeySize = uint32(keySize)
 	kvPair.ValueSize = uint32(valueSize)
 	kvPair.HeaderSize = index

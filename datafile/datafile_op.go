@@ -37,6 +37,7 @@ type DataFile struct {
 const (
 	DatafileSuffix        = ".data"
 	HintFileName          = "hint-index"
+	BucketFileName        = "Bucket"
 	MergeFinishedFileName = "merge-finished"
 )
 
@@ -48,6 +49,11 @@ func OpenDataFile(dirPath string, fileId uint32) (*DataFile, error) {
 func OpenHintFile(dirPath string) (*DataFile, error) {
 	fullpath := filepath.Join(dirPath, HintFileName)
 	return newDataFile(fullpath, 0)
+}
+
+func OpenBucketFile(dirPath string, fileId uint32) (*DataFile, error) {
+	fullpath := filepath.Join(dirPath, BucketFileName+"-"+string(fileId))
+	return newDataFile(fullpath, fileId)
 }
 
 func OpenMergeFinishedFile(dirPath string) (*DataFile, error) {

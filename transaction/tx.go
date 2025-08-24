@@ -12,14 +12,16 @@ type (
 )
 
 type Transaction struct {
-	tm            *TransactionManager
-	id            uint64
-	status        atomic.Value
-	pendingWrites map[string]*KvPair
-	isWrite       bool
-	isAutoCommit  bool
-	options       *TxOptions
-	doneCh        chan struct{}
+	tm             *TransactionManager
+	id             uint64
+	status         atomic.Value
+	txCommitType   TxCommitType
+	bucketNameToID map[string]uint64
+	pendingWrites  map[string]*KvPair
+	isWrite        bool
+	isAutoCommit   bool
+	options        *TxOptions
+	doneCh         chan struct{}
 }
 
 func (tx *Transaction) managed(fn func() error) (err error) {
@@ -39,24 +41,6 @@ func (tx *Transaction) managed(fn func() error) (err error) {
 		err = fn()
 	}
 	return
-}
-
-// lock locks the database based on the transaction type.
-func (tx *Transaction) lock() {
-	if tx.isWrite {
-		tx.tm.db.DBLock.Lock()
-	} else {
-		tx.tm.db.DBLock.RLock()
-	}
-}
-
-// unlock unlocks the database based on the transaction type.
-func (tx *Transaction) unlock() {
-	if tx.isWrite {
-		tx.tm.db.DBLock.Unlock()
-	} else {
-		tx.tm.db.DBLock.RUnlock()
-	}
 }
 
 // setStatusCommitting will change the tx status to txStatusCommitting

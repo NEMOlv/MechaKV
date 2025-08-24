@@ -26,23 +26,33 @@ import (
 
 // BTree 结构体
 type BTree struct {
-	tree *btree.BTree
-	lock *sync.RWMutex
+	bucketBTreeMap map[uint64]*btree.BTree
+	lock           *sync.RWMutex
 }
 
 // NewBTree 新建BTree
-func NewBTree() *BTree {
+func NewBTree(bucketIDToName map[uint64]string) *BTree {
+	bucketBTreeMap := make(map[uint64]*btree.BTree, len(bucketIDToName))
+	for bucketID, _ := range bucketIDToName {
+		bucketBTreeMap[bucketID] = btree.New(64)
+	}
 	return &BTree{
-		tree: btree.New(64),
-		lock: new(sync.RWMutex),
+		bucketBTreeMap: bucketBTreeMap,
+		lock:           new(sync.RWMutex),
 	}
 }
 
+func (bt *BTree) AddBucketBTree(bucketID uint64) {
+	bt.lock.Lock()
+	defer bt.lock.Unlock()
+	bt.bucketBTreeMap[bucketID] = btree.New(64)
+}
+
 // Put 添加索引
-func (bt *BTree) Put(key []byte, pos *KvPairPos) *KvPairPos {
+func (bt *BTree) Put(bucketID uint64, key []byte, pos *KvPairPos) *KvPairPos {
 	bt.lock.Lock()
 	item := &Item{Key: key, Pos: pos}
-	oldItem := bt.tree.ReplaceOrInsert(item)
+	oldItem := bt.bucketBTreeMap[bucketID].ReplaceOrInsert(item)
 	bt.lock.Unlock()
 	if oldItem == nil {
 		return nil
@@ -51,9 +61,9 @@ func (bt *BTree) Put(key []byte, pos *KvPairPos) *KvPairPos {
 }
 
 // Get 获取索引
-func (bt *BTree) Get(key []byte) *KvPairPos {
+func (bt *BTree) Get(bucketID uint64, key []byte) *KvPairPos {
 	inItem := &Item{Key: key}
-	outItem := bt.tree.Get(inItem)
+	outItem := bt.bucketBTreeMap[bucketID].Get(inItem)
 	// 判空操作，因为nil值无法进行强转
 	if outItem == nil {
 		return nil
@@ -62,10 +72,10 @@ func (bt *BTree) Get(key []byte) *KvPairPos {
 }
 
 // Delete 删除索引
-func (bt *BTree) Delete(key []byte) (*KvPairPos, bool) {
+func (bt *BTree) Delete(bucketID uint64, key []byte) (*KvPairPos, bool) {
 	bt.lock.Lock()
 	item := &Item{Key: key}
-	oldItem := bt.tree.Delete(item)
+	oldItem := bt.bucketBTreeMap[bucketID].Delete(item)
 	bt.lock.Unlock()
 	if oldItem == nil {
 		return nil, false
@@ -74,57 +84,58 @@ func (bt *BTree) Delete(key []byte) (*KvPairPos, bool) {
 }
 
 // Iterator 生成一个迭代器
-func (bt *BTree) Iterator(reverse bool) IndexIterator {
-	if bt.tree == nil {
+func (bt *BTree) Iterator(bucketID uint64, reverse bool) IndexIterator {
+	if bt.bucketBTreeMap[bucketID] == nil {
 		return nil
 	}
 	bt.lock.RLock()
 	defer bt.lock.RUnlock()
 
-	return newBTreeIterator(bt.tree, reverse)
+	return newBTreeIterator(bt.bucketBTreeMap[bucketID], reverse)
 }
 
 // Size 返回BTree大小
-func (bt *BTree) Size() int {
-	return bt.tree.Len()
+func (bt *BTree) Size(bucketID uint64) int {
+	return bt.bucketBTreeMap[bucketID].Len()
 }
 
 // Close 关闭BTree
 func (bt *BTree) Close() error {
+	bt.bucketBTreeMap = nil
 	return nil
 }
 
 // Ascend 全局升序遍历
-func (bt *BTree) Ascend(handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos {
-	return bt.Iterate(Ascend, nil, nil, handleFn)
+func (bt *BTree) Ascend(bucketID uint64, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos {
+	return bt.Iterate(Ascend, bucketID, nil, nil, handleFn)
 }
 
 // Descend 全局降序遍历
-func (bt *BTree) Descend(handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos {
-	return bt.Iterate(Descend, nil, nil, handleFn)
+func (bt *BTree) Descend(bucketID uint64, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos {
+	return bt.Iterate(Descend, bucketID, nil, nil, handleFn)
 }
 
 // AscendRange 范围升序遍历
-func (bt *BTree) AscendRange(startKey, endKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos {
-	return bt.Iterate(Ascend, startKey, endKey, handleFn)
+func (bt *BTree) AscendRange(bucketID uint64, startKey, endKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos {
+	return bt.Iterate(Ascend, bucketID, startKey, endKey, handleFn)
 }
 
 // DescendRange 范围降序遍历
-func (bt *BTree) DescendRange(startKey, endKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos {
-	return bt.Iterate(Descend, startKey, endKey, handleFn)
+func (bt *BTree) DescendRange(bucketID uint64, startKey, endKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos {
+	return bt.Iterate(Descend, bucketID, startKey, endKey, handleFn)
 }
 
 // AscendGreaterOrEqual 大于等于某个key的升序遍历
-func (bt *BTree) AscendGreaterOrEqual(startKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos {
-	return bt.Iterate(Ascend, startKey, nil, handleFn)
+func (bt *BTree) AscendGreaterOrEqual(bucketID uint64, startKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos {
+	return bt.Iterate(Ascend, bucketID, startKey, nil, handleFn)
 }
 
 // DescendLessOrEqual 小于等于某个key的降序遍历
-func (bt *BTree) DescendLessOrEqual(startKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos {
-	return bt.Iterate(Descend, startKey, nil, handleFn)
+func (bt *BTree) DescendLessOrEqual(bucketID uint64, startKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos {
+	return bt.Iterate(Descend, bucketID, startKey, nil, handleFn)
 }
 
-func (bt *BTree) Iterate(iterateType IterateType, startKey, endKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos {
+func (bt *BTree) Iterate(iterateType IterateType, bucketID uint64, startKey, endKey []byte, handleFn func(key []byte, pos *KvPairPos) (bool, error)) []*KvPairPos {
 	bt.lock.RLock()
 	defer bt.lock.RUnlock()
 
@@ -145,17 +156,17 @@ func (bt *BTree) Iterate(iterateType IterateType, startKey, endKey []byte, handl
 	}
 
 	if iterateType == Ascend && startKey != nil && endKey == nil {
-		bt.tree.AscendGreaterOrEqual(&Item{Key: startKey}, internalHandleFn)
+		bt.bucketBTreeMap[bucketID].AscendGreaterOrEqual(&Item{Key: startKey}, internalHandleFn)
 	} else if iterateType == Ascend && startKey != nil && endKey != nil {
-		bt.tree.AscendRange(&Item{Key: startKey}, &Item{Key: endKey}, internalHandleFn)
+		bt.bucketBTreeMap[bucketID].AscendRange(&Item{Key: startKey}, &Item{Key: endKey}, internalHandleFn)
 	} else if iterateType == Ascend && startKey == nil && endKey == nil {
-		bt.tree.Ascend(internalHandleFn)
+		bt.bucketBTreeMap[bucketID].Ascend(internalHandleFn)
 	} else if iterateType == Descend && startKey != nil && endKey == nil {
-		bt.tree.DescendLessOrEqual(&Item{Key: startKey}, internalHandleFn)
+		bt.bucketBTreeMap[bucketID].DescendLessOrEqual(&Item{Key: startKey}, internalHandleFn)
 	} else if iterateType == Descend && startKey != nil && endKey != nil {
-		bt.tree.DescendRange(&Item{Key: startKey}, &Item{Key: endKey}, internalHandleFn)
+		bt.bucketBTreeMap[bucketID].DescendRange(&Item{Key: startKey}, &Item{Key: endKey}, internalHandleFn)
 	} else if iterateType == Descend && startKey == nil && endKey == nil {
-		bt.tree.Descend(internalHandleFn)
+		bt.bucketBTreeMap[bucketID].Descend(internalHandleFn)
 	}
 	return KvPairPosSlice
 }

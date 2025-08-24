@@ -32,10 +32,10 @@ type Iterator struct {
 	idxIter IndexIterator
 }
 
-func NewIterator(db *DB) *Iterator {
+func NewIterator(bucketID uint64, db *DB) *Iterator {
 	return &Iterator{
 		db:      db,
-		idxIter: db.Index.Iterator(db.Opts.IteratorOpts.Reverse),
+		idxIter: db.Index.Iterator(bucketID, db.Opts.IteratorOpts.Reverse),
 	}
 }
 

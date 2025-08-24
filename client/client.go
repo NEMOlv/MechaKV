@@ -37,49 +37,44 @@ type (
 
 // Client 客户端结构体
 type Client struct {
-	db   *DB
-	tm   *TransactionManager
-	iter *Iterator
+	db      *DB
+	tm      *TransactionManager
+	iterMap map[uint64]*Iterator
 }
 
 // OpenClient 打开客户端
-func OpenClient(db *DB) (client *Client, err error) {
-	// 打开事务管理器
-	tm := transaction.NewTransactionManager(db)
-
-	// 打开迭代器
-	iter := iterator.NewIterator(db)
-
+func OpenClient(db *DB) (client *Client) {
 	// 构建客户端
-	client = &Client{
-		db:   db,
-		tm:   tm,
-		iter: iter,
+	return &Client{
+		db:      db,
+		tm:      transaction.NewTransactionManager(db),
+		iterMap: make(map[uint64]*Iterator),
 	}
-
-	return
 }
 
 // Close 关闭客户端
 // 关闭客户端不代表关闭数据库，数据库需另外手动关闭
 func (client *Client) Close() (err error) {
 	client.tm.Close()
-	client.iter.Close()
+	for _, iter := range client.iterMap {
+		iter.Close()
+	}
+	client.iterMap = nil
 	client.db = nil
 	client.tm = nil
-	client.iter = nil
 	return
 }
 
 // 基础KV数据结构
 // 添加数据
 // Put 添加数据
-func (client *Client) Put(key, value []byte, opOpts ...func(*PutOptions)) (err error) {
+func (client *Client) Put(key, value []byte, opOpts ...func(*CliOptions)) (err error) {
 	// 1. 初始化默认选项
-	var putOptions = &PutOptions{
-		ttl:       DefaultPutOptions.ttl,          // 默认为"永久"值
-		timestamp: uint64(time.Now().UnixMilli()), // 默认当前毫秒时间
-		condition: DefaultPutOptions.condition,    // 默认为正常PUT
+	var putOptions = &CliOptions{
+		ttl:        DefaultCliOptions.ttl,          // 默认为"永久"值
+		timestamp:  uint64(time.Now().UnixMilli()), // 默认当前毫秒时间
+		condition:  DefaultCliOptions.condition,    // 默认为正常PUT
+		bucketName: DefaultCliOptions.bucketName,
 	}
 
 	// 2. 应用用户传入的选项（覆盖默认值）
@@ -88,148 +83,212 @@ func (client *Client) Put(key, value []byte, opOpts ...func(*PutOptions)) (err e
 	}
 
 	// 3.创建事务并提交
+	bucketNames := []string{"default"}
 	var tx *Transaction
-	if tx, err = client.tm.Begin(true, true, DefaultTxOptions); err != nil {
+	if tx, err = client.tm.Begin(CommitKV, true, true, bucketNames, DefaultTxOptions); err != nil {
 		return
 	}
-	_, err = tx.Put(key, value, putOptions.ttl, putOptions.timestamp, putOptions.condition)
+	_, err = tx.Put(putOptions.bucketName, key, value, putOptions.ttl, putOptions.timestamp, putOptions.condition)
 	return
 }
 
 // 更新数据
 // PutAndGet 更新数据的同时，返回旧值
-func (client *Client) PutAndGet(key, value []byte, opOpts ...func(*PutOptions)) (oldValue []byte, err error) {
+func (client *Client) PutAndGet(key, value []byte, opOpts ...func(*CliOptions)) (oldValue []byte, err error) {
 	// 1. 初始化默认选项
-	var putOptions = &PutOptions{
-		ttl:       DefaultPutOptions.ttl,          // 默认为"永久"值
-		timestamp: uint64(time.Now().UnixMilli()), // 默认当前毫秒时间
-		condition: DefaultPutOptions.condition,    // 默认为正常PUT
+	var putOptions = &CliOptions{
+		ttl:        DefaultCliOptions.ttl,          // 默认为"永久"值
+		timestamp:  uint64(time.Now().UnixMilli()), // 默认当前毫秒时间
+		condition:  DefaultCliOptions.condition,    // 默认为正常PUT
+		bucketName: DefaultCliOptions.bucketName,
 	}
 
 	// 2. 应用用户传入的选项（覆盖默认值）
 	for _, opOpt := range opOpts {
 		opOpt(putOptions)
 	}
-
+	bucketNames := []string{"default"}
 	var tx *Transaction
-	if tx, err = client.tm.Begin(true, true, DefaultTxOptions); err != nil {
+	if tx, err = client.tm.Begin(CommitKV, true, true, bucketNames, DefaultTxOptions); err != nil {
 		return
 	}
 
-	return tx.Put(key, value, putOptions.ttl, putOptions.timestamp, PUT_AND_RETURN_OLD_VALUE)
+	return tx.Put(putOptions.bucketName, key, value, putOptions.ttl, putOptions.timestamp, PUT_AND_RETURN_OLD_VALUE)
 }
 
 // UpdateTTL 更新TTL(生命周期)
-func (client *Client) UpdateTTL(key []byte, ttl uint32) (err error) {
+func (client *Client) UpdateTTL(bucketName string, key []byte, ttl uint32) (err error) {
+	bucketNames := []string{"default"}
 	var tx *Transaction
-	if tx, err = client.tm.Begin(true, true, DefaultTxOptions); err != nil {
+	if tx, err = client.tm.Begin(CommitKV, true, true, bucketNames, DefaultTxOptions); err != nil {
 		return
 	}
-	_, err = tx.Put(key, nil, ttl, uint64(time.Now().UnixMilli()), UPDATE_TTL)
+	_, err = tx.Put(bucketName, key, nil, ttl, uint64(time.Now().UnixMilli()), UPDATE_TTL)
 	return
 }
 
 // Persist 将TTL(生命周期)设置为永久
-func (client *Client) Persist(key []byte) (err error) {
-	return client.UpdateTTL(key, PERSISTENT)
+func (client *Client) Persist(bucketName string, key []byte) (err error) {
+	return client.UpdateTTL(bucketName, key, PERSISTENT)
 }
 
 // todo：Redis的高精度操作Incr、Decr、IncrBy、DecrBy，如果让用户自己实现，用户就需要自己考虑大数的高精度问题
 
 // 获取数据
 // Get 获取数据
-func (client *Client) Get(key []byte) (value []byte, err error) {
+func (client *Client) Get(key []byte, opOpts ...func(*CliOptions)) (value []byte, err error) {
+	// 1. 初始化默认选项
+	var getOptions = &CliOptions{
+		bucketName: DefaultCliOptions.bucketName, // 默认为"永久"值
+	}
+
+	// 2. 应用用户传入的选项（覆盖默认值）
+	for _, opOpt := range opOpts {
+		opOpt(getOptions)
+	}
+
+	bucketNames := []string{"default"}
 	var tx *Transaction
-	if tx, err = client.tm.Begin(false, true, DefaultTxOptions); err != nil {
+	if tx, err = client.tm.Begin(CommitKV, false, true, bucketNames, DefaultTxOptions); err != nil {
 		return
 	}
-	value, err = tx.Get(key)
+	value, err = tx.Get(getOptions.bucketName, key)
 	return
 }
 
 // GetKvPair 获取KvPair
-func (client *Client) GetKvPair(key []byte) (kvPair *KvPair, err error) {
+func (client *Client) GetKvPair(key []byte, opOpts ...func(*CliOptions)) (kvPair *KvPair, err error) {
+	// 1. 初始化默认选项
+	var getOptions = &CliOptions{
+		bucketName: DefaultCliOptions.bucketName, // 默认为default
+	}
+
+	// 2. 应用用户传入的选项（覆盖默认值）
+	for _, opOpt := range opOpts {
+		opOpt(getOptions)
+	}
+
+	bucketNames := []string{"default"}
 	var tx *Transaction
-	if tx, err = client.tm.Begin(false, true, DefaultTxOptions); err != nil {
+	if tx, err = client.tm.Begin(CommitKV, false, true, bucketNames, DefaultTxOptions); err != nil {
 		return
 	}
-	kvPair, err = tx.GetKvPair(key)
+	kvPair, err = tx.GetKvPair(getOptions.bucketName, key)
 	return
 }
 
 // 删除数据
 // Delete 删除数据
-func (client *Client) Delete(key []byte) (err error) {
+func (client *Client) Delete(key []byte, opOpts ...func(*CliOptions)) (err error) {
+	// 1. 初始化默认选项
+	var deleteOptions = &CliOptions{
+		bucketName: DefaultCliOptions.bucketName, // 默认为default
+	}
+
+	// 2. 应用用户传入的选项（覆盖默认值）
+	for _, opOpt := range opOpts {
+		opOpt(deleteOptions)
+	}
+
+	bucketNames := []string{"default"}
 	var tx *Transaction
-	if tx, err = client.tm.Begin(true, true, DefaultTxOptions); err != nil {
+	if tx, err = client.tm.Begin(CommitKV, true, true, bucketNames, DefaultTxOptions); err != nil {
 		return
 	}
-	err = tx.Delete(key)
+	err = tx.Delete(deleteOptions.bucketName, key)
 	return
 }
 
 // 批量操作
 // BatchGet 批量获取数据
-func (client *Client) BatchGet(key []byte) (value []byte, err error) {
+func (client *Client) BatchGet(key []byte, opOpts ...func(*CliOptions)) (value []byte, err error) {
+	// 1. 初始化默认选项
+	var opts = &CliOptions{
+		bucketName: DefaultCliOptions.bucketName, // 默认为default
+	}
+
+	// 2. 应用用户传入的选项（覆盖默认值）
+	for _, opOpt := range opOpts {
+		opOpt(opts)
+	}
+
+	bucketNames := []string{"default"}
 	var tx *Transaction
-	if tx, err = client.tm.Begin(false, true, DefaultTxOptions); err != nil {
+	if tx, err = client.tm.Begin(CommitKV, false, true, bucketNames, DefaultTxOptions); err != nil {
 		return
 	} else {
-		value, err = tx.Get(key)
+		value, err = tx.Get(opts.bucketName, key)
 		return
 	}
 }
 
 // BatchPut 批量添加数据
-func (client *Client) BatchPut(key, value [][]byte, opOpts ...func(*PutOptions)) (err error) {
+func (client *Client) BatchPut(key, value [][]byte, opOpts ...func(*CliOptions)) (err error) {
 	// 1. 初始化默认选项
-	putOptions := &PutOptions{
-		ttl:       PERSISTENT,                     // 默认为"永久"值
-		timestamp: uint64(time.Now().UnixMilli()), // 默认当前毫秒时间
-		condition: PUT_NORMAL,                     // 默认为正常PUT
+	opts := &CliOptions{
+		ttl:        PERSISTENT,                     // 默认为"永久"值
+		timestamp:  uint64(time.Now().UnixMilli()), // 默认当前毫秒时间
+		condition:  PUT_NORMAL,                     // 默认为正常PUT
+		bucketName: DefaultCliOptions.bucketName,   // 默认为default
 	}
 
 	// 2. 应用用户传入的选项（覆盖默认值）
 	for _, opOpt := range opOpts {
-		opOpt(putOptions)
+		opOpt(opts)
 	}
 
+	bucketNames := []string{"default"}
 	var tx *Transaction
-	if tx, err = client.tm.Begin(true, true, DefaultTxOptions); err != nil {
+	if tx, err = client.tm.Begin(CommitKV, true, true, bucketNames, DefaultTxOptions); err != nil {
 		return
 	}
-	_, err = tx.BatchPut(key, value, putOptions.ttl, putOptions.timestamp, putOptions.condition)
+	_, err = tx.BatchPut(opts.bucketName, key, value, opts.ttl, opts.timestamp, opts.condition)
 	return
 }
 
 // BatchPutAndGet 批量更新数据的同时，返回旧值
-func (client *Client) BatchPutAndGet(key, value [][]byte, opOpts ...func(*PutOptions)) (oldValue [][]byte, err error) {
+func (client *Client) BatchPutAndGet(key, value [][]byte, opOpts ...func(*CliOptions)) (oldValue [][]byte, err error) {
 	// 1. 初始化默认选项
-	putOptions := &PutOptions{
-		ttl:       PERSISTENT,                     // 默认为"永久"值
-		timestamp: uint64(time.Now().UnixMilli()), // 默认当前毫秒时间
+	opts := &CliOptions{
+		ttl:        PERSISTENT,                     // 默认为"永久"值
+		timestamp:  uint64(time.Now().UnixMilli()), // 默认当前毫秒时间
+		bucketName: DefaultCliOptions.bucketName,   // 默认为default
 	}
 
 	// 2. 应用用户传入的选项（覆盖默认值）
 	for _, opOpt := range opOpts {
-		opOpt(putOptions)
+		opOpt(opts)
 	}
 
+	bucketNames := []string{"default"}
 	var tx *Transaction
-	if tx, err = client.tm.Begin(true, true, DefaultTxOptions); err != nil {
+	if tx, err = client.tm.Begin(CommitKV, true, true, bucketNames, DefaultTxOptions); err != nil {
 		return
 	}
 
-	return tx.BatchPut(key, value, putOptions.ttl, putOptions.timestamp, PUT_AND_RETURN_OLD_VALUE)
+	return tx.BatchPut(opts.bucketName, key, value, opts.ttl, opts.timestamp, PUT_AND_RETURN_OLD_VALUE)
 }
 
 // BatchUpdateTTL 批量更新TTL(生命周期)
-func (client *Client) BatchUpdateTTL(key [][]byte, ttl uint32) (err error) {
+func (client *Client) BatchUpdateTTL(key [][]byte, ttl uint32, opOpts ...func(*CliOptions)) (err error) {
+	// 1. 初始化默认选项
+	opts := &CliOptions{
+		ttl:        PERSISTENT,                     // 默认为"永久"值
+		timestamp:  uint64(time.Now().UnixMilli()), // 默认当前毫秒时间
+		bucketName: DefaultCliOptions.bucketName,   // 默认为default
+	}
+
+	// 2. 应用用户传入的选项（覆盖默认值）
+	for _, opOpt := range opOpts {
+		opOpt(opts)
+	}
+
+	bucketNames := []string{"default"}
 	var tx *Transaction
-	if tx, err = client.tm.Begin(true, true, DefaultTxOptions); err != nil {
+	if tx, err = client.tm.Begin(CommitKV, true, true, bucketNames, DefaultTxOptions); err != nil {
 		return
 	}
-	_, err = tx.BatchPut(key, nil, ttl, uint64(time.Now().UnixMilli()), UPDATE_TTL)
+	_, err = tx.BatchPut(opts.bucketName, key, nil, ttl, uint64(time.Now().UnixMilli()), UPDATE_TTL)
 	return
 }
 
@@ -239,12 +298,25 @@ func (client *Client) BatchPersist(key [][]byte) (err error) {
 }
 
 // BatchDelete 批量删除数据
-func (client *Client) BatchDelete(key [][]byte) (err error) {
+func (client *Client) BatchDelete(key [][]byte, opOpts ...func(*CliOptions)) (err error) {
+	// 1. 初始化默认选项
+	opts := &CliOptions{
+		ttl:        PERSISTENT,                     // 默认为"永久"值
+		timestamp:  uint64(time.Now().UnixMilli()), // 默认当前毫秒时间
+		bucketName: DefaultCliOptions.bucketName,   // 默认为default
+	}
+
+	// 2. 应用用户传入的选项（覆盖默认值）
+	for _, opOpt := range opOpts {
+		opOpt(opts)
+	}
+
+	bucketNames := []string{"default"}
 	var tx *Transaction
-	if tx, err = client.tm.Begin(true, true, DefaultTxOptions); err != nil {
+	if tx, err = client.tm.Begin(CommitKV, true, true, bucketNames, DefaultTxOptions); err != nil {
 		return
 	} else {
-		err = tx.BatchDelete(key)
+		err = tx.BatchDelete(opts.bucketName, key)
 		return
 	}
 }
