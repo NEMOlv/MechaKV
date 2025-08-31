@@ -22,7 +22,7 @@ import (
 )
 
 const MaxKvPairHeaderSize int64 = 4 + 1 + 1 + binary.MaxVarintLen64*3 + binary.MaxVarintLen32*3
-
+const MaxBucketHeaderSize int64 = 4 + 1 + 1 + binary.MaxVarintLen64*2 + binary.MaxVarintLen16 + 64
 const (
 	MergeDirName     = "-merge"
 	MergeFinishedKey = "merge-finished"
@@ -60,11 +60,11 @@ const (
 	TransactionClosed
 )
 
-type KvPairType = uint8
+type RecordType = uint8
 
 const (
-	KvPairPuted KvPairType = iota
-	KvPairDeleted
+	RecordPuted RecordType = iota
+	RecordDeleted
 	TxFinished
 )
 

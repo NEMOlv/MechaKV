@@ -19,6 +19,7 @@ package transaction
 import (
 	. "MechaKV/comment"
 	"MechaKV/database"
+	"MechaKV/utils"
 	"context"
 	"errors"
 	cmap "github.com/orcaman/concurrent-map/v2"
@@ -74,6 +75,8 @@ func (tm *TransactionManager) BeginKV(isWrite, isAutoCommit bool, bucketNames []
 	// 传入事务管理器
 	tx.tm = tm
 	tx.txCommitType = CommitKV
+	// 配置事务中的桶
+	tx.bucketNameToID = make(map[string]uint64, len(bucketNames))
 	// 初始化待写数组
 	tx.pendingWrites = make(map[string]*KvPair)
 	// 配置当前事务是否为写事务和自动提交
@@ -94,8 +97,12 @@ func (tm *TransactionManager) BeginKV(isWrite, isAutoCommit bool, bucketNames []
 		}
 	}
 
+	// 桶级锁加锁
 	for _, bucketID := range bucketIDs {
-		tm.lock(bucketID, isWrite)
+		err := tm.lock(bucketID, isWrite)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// 雪花算法生成事务ID
@@ -194,7 +201,7 @@ func (tm *TransactionManager) Begin(txCommitType TxCommitType, isWrite, isAutoCo
 
 func (tm *TransactionManager) CommitKV(tx *Transaction) (err error) {
 	// 事务管理器加锁，避免提交事务时，pendingWrites被修改
-	defer func() {
+	defer func() error {
 		// 事务无论是否提交成功，都需要进行后清理
 		// 待写数组置空
 
@@ -203,9 +210,13 @@ func (tm *TransactionManager) CommitKV(tx *Transaction) (err error) {
 		tm.ActiveTxs.Remove(strconv.FormatUint(tx.id, 10))
 		tx.setStatusClosed()
 		for _, bucketID := range tx.bucketNameToID {
-			tm.unlock(bucketID, tx.isWrite)
+			err := tm.unlock(bucketID, tx.isWrite)
+			if err != nil {
+				return err
+			}
 		}
 		tm.TxPool.Put(tx)
+		return nil
 	}()
 
 	// 如果事务已经关闭，返回无法提交已关闭事务的错误
@@ -263,10 +274,10 @@ func (tm *TransactionManager) CommitKV(tx *Transaction) (err error) {
 	for key, kvPair := range tx.pendingWrites {
 		pos := positions[key]
 		var oldPos *KvPairPos
-		if kvPair.Type == KvPairPuted {
+		if kvPair.Type == RecordPuted {
 			// 索引和插槽添加数据
 			oldPos = tm.db.Index.Put(kvPair.BucketID, kvPair.Key, pos)
-		} else if kvPair.Type == KvPairDeleted {
+		} else if kvPair.Type == RecordDeleted {
 			// 索引删除数据
 			oldPos, _ = tm.db.Index.Delete(kvPair.BucketID, kvPair.Key)
 		}
@@ -292,7 +303,6 @@ func (tm *TransactionManager) CommitBucket(tx *Transaction) (err error) {
 	defer func() {
 		// 事务无论是否提交成功，都需要进行后清理
 		// 待写数组置空
-
 		tx.pendingWrites = nil
 		// 从事务map中删除执行完毕的事务
 		tm.ActiveTxs.Remove(strconv.FormatUint(tx.id, 10))
@@ -330,20 +340,43 @@ func (tm *TransactionManager) CommitBucket(tx *Transaction) (err error) {
 
 	// 待写数组计数器，当cnt为0时，代表该事务的最后一条记录，为其添加TxFinished标识
 	cnt := len(tx.pendingWrites)
-	for key, pendingKvPair := range tx.pendingWrites {
+	for _, pendingKvPair := range tx.pendingWrites {
 		cnt--
 		if cnt == 0 {
 			pendingKvPair.TxFinshed = TxFinished
 		}
-		err := tm.db.BucketManager.GenerateBucket(key)
+		KvPairBuffer := bytebufferpool.Get()
+		tm.TxBuffers[tx.id] = append(tm.TxBuffers[tx.id], KvPairBuffer)
+		err := tm.db.BucketManager.AppendBucket(pendingKvPair, tm.db.KvPairHeader, KvPairBuffer)
 		if err != nil {
 			return err
+		}
+
+		// 异步删除桶级锁，会等待其余已经获取桶级锁的事务处理完毕后，才真正删除桶级锁
+
+		if pendingKvPair.Type == RecordDeleted {
+			go func() error {
+				err := tm.db.BucketManager.DeleteBucketLock(utils.BytesToUint64(pendingKvPair.Value))
+				if err != nil {
+					return err
+				}
+
+				delete(tx.bucketNameToID, string(pendingKvPair.Key))
+				return nil
+			}()
 		}
 
 		tm.KvPairPool.Put(pendingKvPair)
 	}
 
+	for _, KvPairBuffer := range tm.TxBuffers[tx.id] {
+		bytebufferpool.Put(KvPairBuffer)
+	}
+	clear(tm.TxBuffers[tx.id])
+	delete(tm.TxBuffers, tx.id)
+
 	close(tx.doneCh)
+
 	return
 }
 
@@ -399,11 +432,19 @@ func (tm *TransactionManager) Rollback(tx *Transaction) error {
 }
 
 // lock
-func (tm *TransactionManager) lock(bucketID uint64, isWrite bool) {
-	tm.db.BucketManager.GetBucketLock(bucketID, isWrite)
+func (tm *TransactionManager) lock(bucketID uint64, isWrite bool) error {
+	err := tm.db.BucketManager.HoldBucketLock(bucketID, isWrite)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 // unlock
-func (tm *TransactionManager) unlock(bucketID uint64, isWrite bool) {
-	tm.db.BucketManager.ReleaseBucketLock(bucketID, isWrite)
+func (tm *TransactionManager) unlock(bucketID uint64, isWrite bool) error {
+	err := tm.db.BucketManager.ReleaseBucketLock(bucketID, isWrite)
+	if err != nil {
+		return err
+	}
+	return nil
 }

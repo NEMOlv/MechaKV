@@ -168,7 +168,7 @@ func TestLoadDataFiles(t *testing.T) {
 		Opts: Options{
 			DirPath: dir,
 		},
-		OlderFiles: make(map[uint32]*datafile.DataFile),
+		OldFiles: make(map[uint32]*datafile.DataFile),
 	}
 
 	err = db.loadDataFiles()
@@ -271,7 +271,7 @@ func TestLoadIndexFromDataFiles(t *testing.T) {
 			Value:     testValue,
 			KeySize:   uint32(len(testKey)),
 			ValueSize: uint32(len(testValue)),
-			Type:      KvPairPuted,
+			Type:      RecordPuted,
 		}
 		header := make([]byte, MaxKvPairHeaderSize)
 		buffer := bytebufferpool.Get()
@@ -292,7 +292,7 @@ func TestLoadIndexFromDataFiles(t *testing.T) {
 		},
 		fileIds:    []uint32{FileID},
 		ActiveFile: dataFile,
-		OlderFiles: make(map[uint32]*datafile.DataFile),
+		OldFiles:   make(map[uint32]*datafile.DataFile),
 		Index:      index.NewBTree(),
 	}
 
@@ -357,7 +357,7 @@ func TestAppendKvPair(t *testing.T) {
 		Value:     testValue,
 		KeySize:   uint32(len(testKey)),
 		ValueSize: uint32(len(testValue)),
-		Type:      KvPairPuted,
+		Type:      RecordPuted,
 	}
 
 	buffer := bytebufferpool.Get()
@@ -393,7 +393,7 @@ func TestGetValueByPosition(t *testing.T) {
 		Value:     testValue,
 		KeySize:   uint32(len(testKey)),
 		ValueSize: uint32(len(testValue)),
-		Type:      KvPairPuted,
+		Type:      RecordPuted,
 	}
 	header := make([]byte, MaxKvPairHeaderSize)
 	buffer := bytebufferpool.Get()
@@ -412,7 +412,7 @@ func TestGetValueByPosition(t *testing.T) {
 		},
 		fileIds:    []uint32{testFileID},
 		ActiveFile: testDataFile,
-		OlderFiles: make(map[uint32]*datafile.DataFile),
+		OldFiles:   make(map[uint32]*datafile.DataFile),
 		Index:      index.NewBTree(),
 	}
 
@@ -449,7 +449,7 @@ func TestGetKvPairByPosition(t *testing.T) {
 		Value:     testValue,
 		KeySize:   uint32(len(testKey)),
 		ValueSize: uint32(len(testValue)),
-		Type:      KvPairPuted,
+		Type:      RecordPuted,
 	}
 
 	header := make([]byte, MaxKvPairHeaderSize)
@@ -471,7 +471,7 @@ func TestGetKvPairByPosition(t *testing.T) {
 		},
 		fileIds:    []uint32{testFileID},
 		ActiveFile: testDataFile,
-		OlderFiles: make(map[uint32]*datafile.DataFile),
+		OldFiles:   make(map[uint32]*datafile.DataFile),
 		Index:      index.NewBTree(),
 	}
 

@@ -60,8 +60,61 @@ func (client *Client) Close() (err error) {
 		iter.Close()
 	}
 	client.iterMap = nil
-	client.db = nil
+	//client.db = nil
 	client.tm = nil
+	return
+}
+
+// Bucket
+func (client *Client) Create(bucketName string) (err error) {
+	var tx *Transaction
+	if tx, err = client.tm.Begin(CommitBucket, true, true, nil, DefaultTxOptions); err != nil {
+		return
+	}
+	err = tx.CreateBucket(bucketName)
+	if err != nil {
+		return
+	}
+	return
+}
+
+func (client *Client) BatchCreate(bucketNames []string) (err error) {
+	var tx *Transaction
+	for _, bucketName := range bucketNames {
+		if tx, err = client.tm.Begin(CommitBucket, true, true, nil, DefaultTxOptions); err != nil {
+			return
+		}
+		err = tx.CreateBucket(bucketName)
+		if err != nil {
+			return
+		}
+	}
+	return
+}
+
+func (client *Client) Drop(bucketName string) (err error) {
+	var tx *Transaction
+	if tx, err = client.tm.Begin(CommitBucket, true, true, nil, DefaultTxOptions); err != nil {
+		return
+	}
+	err = tx.DropBucket(bucketName)
+	if err != nil {
+		return
+	}
+	return
+}
+
+func (client *Client) BatchDrop(bucketNames []string) (err error) {
+	var tx *Transaction
+	for _, bucketName := range bucketNames {
+		if tx, err = client.tm.Begin(CommitBucket, true, true, nil, DefaultTxOptions); err != nil {
+			return
+		}
+		err = tx.DropBucket(bucketName)
+		if err != nil {
+			return
+		}
+	}
 	return
 }
 
@@ -83,7 +136,7 @@ func (client *Client) Put(key, value []byte, opOpts ...func(*CliOptions)) (err e
 	}
 
 	// 3.创建事务并提交
-	bucketNames := []string{"default"}
+	bucketNames := []string{putOptions.bucketName}
 	var tx *Transaction
 	if tx, err = client.tm.Begin(CommitKV, true, true, bucketNames, DefaultTxOptions); err != nil {
 		return
@@ -107,7 +160,7 @@ func (client *Client) PutAndGet(key, value []byte, opOpts ...func(*CliOptions)) 
 	for _, opOpt := range opOpts {
 		opOpt(putOptions)
 	}
-	bucketNames := []string{"default"}
+	bucketNames := []string{putOptions.bucketName}
 	var tx *Transaction
 	if tx, err = client.tm.Begin(CommitKV, true, true, bucketNames, DefaultTxOptions); err != nil {
 		return
@@ -117,19 +170,32 @@ func (client *Client) PutAndGet(key, value []byte, opOpts ...func(*CliOptions)) 
 }
 
 // UpdateTTL 更新TTL(生命周期)
-func (client *Client) UpdateTTL(bucketName string, key []byte, ttl uint32) (err error) {
-	bucketNames := []string{"default"}
+func (client *Client) UpdateTTL(key []byte, ttl uint32, opOpts ...func(*CliOptions)) (err error) {
+	// 1. 初始化默认选项
+	var putOptions = &CliOptions{
+		ttl:        DefaultCliOptions.ttl,          // 默认为"永久"值
+		timestamp:  uint64(time.Now().UnixMilli()), // 默认当前毫秒时间
+		condition:  DefaultCliOptions.condition,    // 默认为正常PUT
+		bucketName: DefaultCliOptions.bucketName,
+	}
+
+	// 2. 应用用户传入的选项（覆盖默认值）
+	for _, opOpt := range opOpts {
+		opOpt(putOptions)
+	}
+
+	bucketNames := []string{putOptions.bucketName}
 	var tx *Transaction
 	if tx, err = client.tm.Begin(CommitKV, true, true, bucketNames, DefaultTxOptions); err != nil {
 		return
 	}
-	_, err = tx.Put(bucketName, key, nil, ttl, uint64(time.Now().UnixMilli()), UPDATE_TTL)
+	_, err = tx.Put(putOptions.bucketName, key, nil, ttl, uint64(time.Now().UnixMilli()), UPDATE_TTL)
 	return
 }
 
 // Persist 将TTL(生命周期)设置为永久
-func (client *Client) Persist(bucketName string, key []byte) (err error) {
-	return client.UpdateTTL(bucketName, key, PERSISTENT)
+func (client *Client) Persist(key []byte, opOpts ...func(*CliOptions)) (err error) {
+	return client.UpdateTTL(key, PERSISTENT, opOpts...)
 }
 
 // todo：Redis的高精度操作Incr、Decr、IncrBy、DecrBy，如果让用户自己实现，用户就需要自己考虑大数的高精度问题
@@ -147,7 +213,7 @@ func (client *Client) Get(key []byte, opOpts ...func(*CliOptions)) (value []byte
 		opOpt(getOptions)
 	}
 
-	bucketNames := []string{"default"}
+	bucketNames := []string{getOptions.bucketName}
 	var tx *Transaction
 	if tx, err = client.tm.Begin(CommitKV, false, true, bucketNames, DefaultTxOptions); err != nil {
 		return
@@ -168,7 +234,7 @@ func (client *Client) GetKvPair(key []byte, opOpts ...func(*CliOptions)) (kvPair
 		opOpt(getOptions)
 	}
 
-	bucketNames := []string{"default"}
+	bucketNames := []string{getOptions.bucketName}
 	var tx *Transaction
 	if tx, err = client.tm.Begin(CommitKV, false, true, bucketNames, DefaultTxOptions); err != nil {
 		return
@@ -190,7 +256,7 @@ func (client *Client) Delete(key []byte, opOpts ...func(*CliOptions)) (err error
 		opOpt(deleteOptions)
 	}
 
-	bucketNames := []string{"default"}
+	bucketNames := []string{deleteOptions.bucketName}
 	var tx *Transaction
 	if tx, err = client.tm.Begin(CommitKV, true, true, bucketNames, DefaultTxOptions); err != nil {
 		return
@@ -212,7 +278,7 @@ func (client *Client) BatchGet(key []byte, opOpts ...func(*CliOptions)) (value [
 		opOpt(opts)
 	}
 
-	bucketNames := []string{"default"}
+	bucketNames := []string{opts.bucketName}
 	var tx *Transaction
 	if tx, err = client.tm.Begin(CommitKV, false, true, bucketNames, DefaultTxOptions); err != nil {
 		return
@@ -237,7 +303,7 @@ func (client *Client) BatchPut(key, value [][]byte, opOpts ...func(*CliOptions))
 		opOpt(opts)
 	}
 
-	bucketNames := []string{"default"}
+	bucketNames := []string{opts.bucketName}
 	var tx *Transaction
 	if tx, err = client.tm.Begin(CommitKV, true, true, bucketNames, DefaultTxOptions); err != nil {
 		return
@@ -260,7 +326,7 @@ func (client *Client) BatchPutAndGet(key, value [][]byte, opOpts ...func(*CliOpt
 		opOpt(opts)
 	}
 
-	bucketNames := []string{"default"}
+	bucketNames := []string{opts.bucketName}
 	var tx *Transaction
 	if tx, err = client.tm.Begin(CommitKV, true, true, bucketNames, DefaultTxOptions); err != nil {
 		return
@@ -283,7 +349,7 @@ func (client *Client) BatchUpdateTTL(key [][]byte, ttl uint32, opOpts ...func(*C
 		opOpt(opts)
 	}
 
-	bucketNames := []string{"default"}
+	bucketNames := []string{opts.bucketName}
 	var tx *Transaction
 	if tx, err = client.tm.Begin(CommitKV, true, true, bucketNames, DefaultTxOptions); err != nil {
 		return
@@ -311,7 +377,7 @@ func (client *Client) BatchDelete(key [][]byte, opOpts ...func(*CliOptions)) (er
 		opOpt(opts)
 	}
 
-	bucketNames := []string{"default"}
+	bucketNames := []string{opts.bucketName}
 	var tx *Transaction
 	if tx, err = client.tm.Begin(CommitKV, true, true, bucketNames, DefaultTxOptions); err != nil {
 		return

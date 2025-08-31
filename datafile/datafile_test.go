@@ -31,7 +31,10 @@ func TestDataFile_WriteAndRead(t *testing.T) {
 	// 创建临时目录
 	dir, err := os.MkdirTemp("../temp", "test_datafile")
 	assert.Nil(t, err)
-	defer os.RemoveAll(dir)
+	defer func(path string) {
+		err := os.RemoveAll(path)
+		assert.Nil(t, err)
+	}(dir)
 
 	// 打开数据文件
 	fileID := uint32(1)
@@ -42,7 +45,7 @@ func TestDataFile_WriteAndRead(t *testing.T) {
 	// 准备测试数据
 	testKey := []byte("test_key")
 	testValue := []byte("test_value")
-	kvPair := NewKvPair(testKey, testValue, KvPairPuted)
+	kvPair := NewKvPair(testKey, testValue, RecordPuted)
 	kvPair.KeySize = uint32(len(testKey))
 	kvPair.ValueSize = uint32(len(testValue))
 
@@ -137,7 +140,7 @@ func TestKvPair_CRC(t *testing.T) {
 
 	// 准备测试数据
 	// 错误数据
-	kvPair := NewKvPair([]byte("crc_key"), []byte("crc_value"), KvPairPuted)
+	kvPair := NewKvPair([]byte("crc_key"), []byte("crc_value"), RecordPuted)
 	kvPair.KeySize = uint32(len(kvPair.Key))
 	kvPair.ValueSize = uint32(len(kvPair.Value))
 	header1 := make([]byte, MaxKvPairHeaderSize)
@@ -146,7 +149,7 @@ func TestKvPair_CRC(t *testing.T) {
 	encoded[5] = encoded[5] + 1
 
 	// 正确数据
-	kvPair2 := NewKvPair([]byte("crc_key"), []byte("crc_value"), KvPairPuted)
+	kvPair2 := NewKvPair([]byte("crc_key"), []byte("crc_value"), RecordPuted)
 	kvPair2.KeySize = uint32(len(kvPair2.Key))
 	kvPair2.ValueSize = uint32(len(kvPair2.Value))
 	header2 := make([]byte, MaxKvPairHeaderSize)
@@ -183,18 +186,18 @@ func TestKvPair_CRC(t *testing.T) {
 // 测试KvPair的过期检查
 func TestKvPair_IsExpired(t *testing.T) {
 	// 持久化数据（不过期）
-	permanent := NewKvPair([]byte("perm_key"), []byte("perm_val"), KvPairPuted)
+	permanent := NewKvPair([]byte("perm_key"), []byte("perm_val"), RecordPuted)
 	permanent.TTL = PERSISTENT
 	assert.False(t, permanent.IsExpired())
 
 	// 未过期数据
-	notExpired := NewKvPair([]byte("not_exp_key"), []byte("not_exp_val"), KvPairPuted)
+	notExpired := NewKvPair([]byte("not_exp_key"), []byte("not_exp_val"), RecordPuted)
 	notExpired.TTL = 3600 // 1小时过期
 	notExpired.Timestamp = uint64(time.Now().UnixMilli())
 	assert.False(t, notExpired.IsExpired())
 
 	// 已过期数据
-	expired := NewKvPair([]byte("exp_key"), []byte("exp_val"), KvPairPuted)
+	expired := NewKvPair([]byte("exp_key"), []byte("exp_val"), RecordPuted)
 	expired.TTL = 1 // 1秒过期
 	expired.Timestamp = uint64(time.Now().Add(-2 * time.Second).UnixMilli())
 	assert.True(t, expired.IsExpired())
@@ -207,7 +210,7 @@ func TestKvPairPos_EncodeDecode(t *testing.T) {
 		Fid:    5,
 		Offset: 1000,
 		Size:   200,
-		Type:   KvPairPuted,
+		Type:   RecordPuted,
 	}
 
 	// 编码解码
@@ -254,7 +257,7 @@ func TestDataFile_BoundaryCases(t *testing.T) {
 	defer dataFile.Close()
 
 	// 测试空数据
-	emptyKv := NewKvPair([]byte{}, []byte{}, KvPairPuted)
+	emptyKv := NewKvPair([]byte{}, []byte{}, RecordPuted)
 	emptyKv.KeySize = 0
 	emptyKv.ValueSize = 0
 	header1 := make([]byte, MaxKvPairHeaderSize)
@@ -280,7 +283,7 @@ func TestDataFile_BoundaryCases(t *testing.T) {
 		largeValue[i] = byte(i % 256)
 	}
 
-	largeKv := NewKvPair(largeKey, largeValue, KvPairPuted)
+	largeKv := NewKvPair(largeKey, largeValue, RecordPuted)
 	largeKv.KeySize = uint32(len(largeKey))
 	largeKv.ValueSize = uint32(len(largeValue))
 	header2 := make([]byte, MaxKvPairHeaderSize)

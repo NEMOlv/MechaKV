@@ -17,6 +17,7 @@ limitations under the License.
 package database
 
 import (
+	"MechaKV/bucket"
 	. "MechaKV/comment"
 	"MechaKV/datafile"
 	"MechaKV/utils"
@@ -47,6 +48,22 @@ func Open(options Options) (*DB, error) {
 		}
 	}
 
+	dataPath := filepath.Join(options.DirPath, "Data")
+	if _, err := os.Stat(dataPath); os.IsNotExist(err) {
+		if err := os.Mkdir(dataPath, os.ModePerm); err != nil {
+			return nil, err
+		}
+	}
+	options.DataPath = dataPath
+
+	bucketPath := filepath.Join(options.DirPath, "Bucket")
+	if _, err := os.Stat(bucketPath); os.IsNotExist(err) {
+		if err := os.Mkdir(bucketPath, os.ModePerm); err != nil {
+			return nil, err
+		}
+	}
+	options.BucketPath = bucketPath
+
 	// 判断当前数据目录是否正在使用
 	fileLock := flock.New(filepath.Join(options.DirPath, FileLockName))
 	hold, err := fileLock.TryLock()
@@ -75,7 +92,7 @@ func Open(options Options) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	BucketManager, err := datafile.NewBucketManager(options.DirPath)
+	BucketManager, err := bucket.NewBucketManager(options.BucketPath)
 	if err != nil {
 		return nil, err
 	}
@@ -125,6 +142,11 @@ func Open(options Options) (*DB, error) {
 			return nil, err
 		}
 		db.ActiveFile.WriteOffset = size
+	} else {
+		err := db.setActiveDataFile()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// 自动合并任务
@@ -142,11 +164,17 @@ func Open(options Options) (*DB, error) {
 // Close 关闭数据库
 func (db *DB) Close() error {
 	// 关闭文件锁
-	defer func() {
+	defer func() error {
 		db.CloseExpiryMonitor()
 		if err := db.fileLock.Unlock(); err != nil {
-			panic(fmt.Sprintf("failed to unlock the directory: %v", err))
+			//panic(fmt.Sprintf("failed to unlock the directory: %v", err))
+			return err
 		}
+		err := db.BucketManager.BucketFile.Close()
+		if err != nil {
+			return err
+		}
+		return nil
 	}()
 
 	// 如果没有当前活跃文件，说明数据库无数据，直接返回
@@ -173,6 +201,7 @@ func (db *DB) Close() error {
 			return err
 		}
 	}
+
 	return nil
 }
 

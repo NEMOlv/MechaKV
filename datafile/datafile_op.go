@@ -42,7 +42,7 @@ const (
 )
 
 func OpenDataFile(dirPath string, fileId uint32) (*DataFile, error) {
-	fullpath := GetDatafileName(dirPath, fileId)
+	fullpath := filepath.Join(dirPath, "Data", fmt.Sprintf("%09d", fileId)+DatafileSuffix)
 	return newDataFile(fullpath, fileId)
 }
 
@@ -52,7 +52,7 @@ func OpenHintFile(dirPath string) (*DataFile, error) {
 }
 
 func OpenBucketFile(dirPath string, fileId uint32) (*DataFile, error) {
-	fullpath := filepath.Join(dirPath, BucketFileName+"-"+string(fileId))
+	fullpath := filepath.Join(dirPath, BucketFileName+"-"+fmt.Sprintf("%09d", fileId)+DatafileSuffix)
 	return newDataFile(fullpath, fileId)
 }
 

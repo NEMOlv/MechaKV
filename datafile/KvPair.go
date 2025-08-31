@@ -49,7 +49,7 @@ type KvPairPos struct {
 	Offset int64
 	// 标识数据在磁盘上的大小
 	Size uint32
-	Type KvPairType
+	Type RecordType
 }
 
 func NewKvPairPos(fid uint32, offset int64, size uint32) KvPairPos {
@@ -64,10 +64,10 @@ func NewKvPairPos(fid uint32, offset int64, size uint32) KvPairPos {
 type KvPair struct {
 	// header
 	Crc        uint32
-	Type       KvPairType
+	Type       RecordType
 	TxId       uint64
 	BucketID   uint64
-	TxFinshed  KvPairType
+	TxFinshed  RecordType
 	Timestamp  uint64
 	TTL        uint32
 	KeySize    uint32
@@ -78,7 +78,7 @@ type KvPair struct {
 	Value []byte
 }
 
-func NewKvPair(key []byte, value []byte, kvPairType KvPairType) KvPair {
+func NewKvPair(key []byte, value []byte, kvPairType RecordType) KvPair {
 	return KvPair{
 		Key:       key,
 		Value:     value,
@@ -140,10 +140,9 @@ func (kvPair *KvPair) DecodeKvPairHeader(buf []byte) {
 	// 如果第一个字节中的数据不为TxFinished：
 	//      代表该事务是多记录提交，使用一个单独TxFinished记录作为标识，此时使用kvPairType接收type和status
 	status, _ := binary.Uvarint(buf[index:])
-	if KvPairType(status) == TxFinished {
-		index++
+	if RecordType(status) == TxFinished {
 		kvPairType, _ = binary.Uvarint(buf[index:])
-		index++
+		index += 2
 	} else {
 		kvPairType, _ = binary.Uvarint(buf[index:])
 		index++
@@ -174,8 +173,8 @@ func (kvPair *KvPair) DecodeKvPairHeader(buf []byte) {
 	index += uint32(n)
 
 	// 将header信息加入kvPair
-	kvPair.TxFinshed = KvPairType(status)
-	kvPair.Type = uint8(kvPairType)
+	kvPair.TxFinshed = RecordType(status)
+	kvPair.Type = RecordType(kvPairType)
 	kvPair.Crc = crc
 	kvPair.TxId = txId
 	kvPair.Timestamp = timestamp

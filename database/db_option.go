@@ -31,7 +31,9 @@ type IteratorOptions struct {
 
 type Options struct {
 	// 数据库目录
-	DirPath string
+	DirPath    string
+	DataPath   string
+	BucketPath string
 	// 数据文件大小
 	DataFileSize int64
 	// 每次写入数据是否持久化

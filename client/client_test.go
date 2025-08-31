@@ -32,7 +32,7 @@ func destroyDB(db *DB) {
 		if db.ActiveFile != nil {
 			_ = db.Close()
 		}
-		for _, of := range db.OlderFiles {
+		for _, of := range db.OldFiles {
 			if of != nil {
 				_ = of.Close()
 			}
@@ -49,7 +49,7 @@ func fastOpen() (*DB, *Client) {
 	dir, _ := os.MkdirTemp("../temp", "MechaKV")
 	opts.DirPath = dir
 	db, _ := database.Open(opts)
-	cli, _ := OpenClient(db)
+	cli := OpenClient(db)
 	return db, cli
 }
 
@@ -62,7 +62,7 @@ func TestOpenAndCloseClient(t *testing.T) {
 	assert.Nil(t, err)
 	assert.NotNil(t, db)
 
-	cli, err := OpenClient(db)
+	cli := OpenClient(db)
 	assert.Nil(t, err)
 	assert.NotNil(t, cli)
 
@@ -70,6 +70,8 @@ func TestOpenAndCloseClient(t *testing.T) {
 	assert.Nil(t, err)
 
 	err = db.Close()
+	assert.Nil(t, err)
+
 	defer destroyDB(db)
 	assert.Nil(t, err)
 }

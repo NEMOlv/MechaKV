@@ -19,6 +19,7 @@ limitations under the License.
 package database
 
 import (
+	"MechaKV/bucket"
 	. "MechaKV/comment"
 	"MechaKV/datafile"
 	"MechaKV/index"
@@ -86,7 +87,7 @@ type DB struct {
 	// TxID生成器
 	TxIdGenerater *snowflake.Node
 	// 桶管理器
-	BucketManager *datafile.BucketManager
+	BucketManager *bucket.BucketManager
 	// 库级锁的header，之后要改成表级锁的header
 	KvPairHeader []byte
 	// 表示数据库是否初始化
@@ -100,7 +101,7 @@ type DB struct {
 // 加载Bucket文件
 func (db *DB) loadBucketFile() error {
 	// 获取数据目录中的所有文件
-	dirFiles, err := os.ReadDir(db.Opts.DirPath)
+	dirFiles, err := os.ReadDir(db.Opts.BucketPath)
 	if err != nil {
 		return err
 	}
@@ -122,7 +123,7 @@ func (db *DB) loadBucketFile() error {
 
 	// 遍历每个数据文件id，打开对应的数据文件
 	for _, fileId := range fileIds {
-		bucketFile, err := datafile.OpenBucketFile(db.Opts.DirPath, fileId)
+		bucketFile, err := datafile.OpenBucketFile(db.Opts.BucketPath, fileId)
 		if err != nil {
 			return err
 		}
@@ -131,6 +132,7 @@ func (db *DB) loadBucketFile() error {
 		var bucketID uint64
 		var bucketName string
 
+		TxMap := make(map[uint64][]*KvPair)
 		for {
 			kvPair, err := bucketFile.ReadKvPair(offset)
 			if err != nil {
@@ -140,13 +142,47 @@ func (db *DB) loadBucketFile() error {
 				return err
 			}
 
-			bucketID = utils.BytesToUint64(kvPair.Key)
-			bucketName = string(kvPair.Value)
-			db.BucketManager.BucketIDToName[bucketID] = bucketName
-			db.BucketManager.BucketNameToID[bucketName] = bucketID
+			// 重构事务
+			TxMap[kvPair.TxId] = append(TxMap[kvPair.TxId], kvPair)
+			// 事务完成
+			if kvPair.TxFinshed == TxFinished {
+				for _, kvPairdPos := range TxMap[kvPair.TxId] {
+					bucketName = string(kvPair.Key)
+					bucketID = utils.BytesToUint64(kvPair.Value)
+					if kvPairdPos.Type == RecordPuted {
+						db.BucketManager.BucketIDToName[bucketID] = bucketName
+						db.BucketManager.BucketNameToID[bucketName] = bucketID
+						db.BucketManager.BucketLock[bucketID] = bucket.NewBucketLockItem()
+					} else {
+						delete(db.BucketManager.BucketIDToName, bucketID)
+						delete(db.BucketManager.BucketNameToID, bucketName)
+						delete(db.BucketManager.BucketLock, bucketID)
+					}
+				}
+				delete(TxMap, kvPair.TxId)
+			}
 
 			offset += int64(kvPair.Size())
 		}
+	}
+
+	// 如果是首次打开数据库，则默认创建一个default桶
+	_, exist := db.BucketManager.BucketNameToID["default"]
+	if !exist {
+		KvPairBuffer := bytebufferpool.Get()
+
+		bucketKvPair := &KvPair{
+			TxId:      uint64(db.TxIdGenerater.Generate()),
+			TxFinshed: TxFinished,
+			Type:      RecordPuted,
+			Key:       []byte("default"),
+			Value:     utils.Uint64ToBytes(db.BucketManager.GenerateBucketID()),
+		}
+		err := db.BucketManager.AppendBucket(bucketKvPair, db.KvPairHeader, KvPairBuffer)
+		if err != nil {
+			return err
+		}
+		bytebufferpool.Put(KvPairBuffer)
 	}
 
 	db.Index = index.NewIndexer(db.BucketManager.BucketIDToName)
@@ -258,7 +294,7 @@ func (db *DB) loadMergedFiles() error {
 // 从数据库目录加载数据文件
 func (db *DB) loadDataFiles() error {
 	// 获取数据目录中的所有文件
-	dirFiles, err := os.ReadDir(db.Opts.DirPath)
+	dirFiles, err := os.ReadDir(db.Opts.DataPath)
 	if err != nil {
 		return err
 	}
@@ -407,7 +443,7 @@ func (db *DB) loadIndexFromDataFiles() error {
 			if kvPair.TxFinshed == TxFinished {
 				for _, kvPairdPos := range TxMap[kvPair.TxId] {
 					var oldPos *KvPairPos
-					if kvPairdPos.Type == KvPairDeleted {
+					if kvPairdPos.Type == RecordDeleted {
 						oldPos, _ = db.Index.Delete(kvPair.BucketID, kvPairdPos.Key)
 						db.ReclaimSize += int64(kvPairdPos.Size)
 					} else {
@@ -505,10 +541,14 @@ func (db *DB) AppendKvPair(kvPair *KvPair, KvPairHeader []byte, KvPairBuffer *by
 		// 计算key的crc，将其映射至不同的slot里
 		keyCrc := crc16.Checksum(kvPair.Key, table)
 		slot := keyCrc % 16384
-		if kvPair.Type == KvPairPuted {
+		if kvPair.Type == RecordPuted {
 			kvPairExpire := db.expiryManager.KvPairExpirePool.Get().(*KvPairExpire)
+			kvPairExpire.Key = kvPair.Key
+			kvPairExpire.BucketID = kvPair.BucketID
+			//println(kvPairExpire.Key)
+			//println(kvPairExpire.BucketID)
 			db.expiryManager.KeySlots[slot] = append(db.expiryManager.KeySlots[slot], kvPairExpire)
-		} else if kvPair.Type == KvPairDeleted {
+		} else if kvPair.Type == RecordDeleted {
 			for idx, deleteKvPair := range db.expiryManager.KeySlots[slot] {
 				if bytes.Equal(kvPair.Key, deleteKvPair.Key) {
 					db.expiryManager.KvPairExpirePool.Put(db.expiryManager.KeySlots[slot][idx])
@@ -525,7 +565,6 @@ func (db *DB) AppendKvPair(kvPair *KvPair, KvPairHeader []byte, KvPairBuffer *by
 // 从db的数据文件中通过Position寻找value
 // 应该属于是db的操作，因为是db负责存储数据文件
 func (db *DB) GetValueByPosition(kvPairPos *KvPairPos) ([]byte, error) {
-
 	kvPair, err := db.GetKvPairByPosition(kvPairPos)
 	if err != nil {
 		return nil, err
@@ -542,6 +581,7 @@ func (db *DB) GetValueByPosition(kvPairPos *KvPairPos) ([]byte, error) {
 }
 
 func (db *DB) GetKvPairByPosition(kvPairPos *KvPairPos) (*KvPair, error) {
+	// 临界区：获取dataFile
 	// 根据文件id找到对应的数据文件
 	var dataFile *DataFile
 	if db.ActiveFile.FileID == kvPairPos.Fid {
@@ -561,31 +601,9 @@ func (db *DB) GetKvPairByPosition(kvPairPos *KvPairPos) (*KvPair, error) {
 		return nil, err
 	}
 
-	if kvPair.Type == KvPairDeleted {
+	if kvPair.Type == RecordDeleted {
 		return nil, ErrKeyNotFound
 	}
 
 	return kvPair, nil
 }
-
-func (db *DB) GenerateBucket(bucketName string) (err error) {
-	err = db.BucketManager.GenerateBucket(bucketName)
-	if err != nil {
-		return err
-	}
-
-	bucketID, _ := db.BucketManager.GetBucketID(bucketName)
-
-	db.BucketManager.BucketLock[bucketID] = datafile.NewBucketLockItem()
-	return
-}
-
-//func (db *DB) DeleteBucket(bucketName string) (err error) {
-//	bucketID, ok := db.BucketManager.GetBucketID(bucketName)
-//	if !ok {
-//		return errors.New("Bucket Not Found")
-//	}
-//
-//	db.DBLock[bucketID].
-//	return
-//}

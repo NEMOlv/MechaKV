@@ -44,7 +44,7 @@ func (opt *CliOptions) SetBucketName(bucketName string) {
 var DefaultCliOptions = CliOptions{
 	ttl:        PERSISTENT, // 默认为"永久"值
 	condition:  PUT_NORMAL, // 默认为正常PUT
-	bucketName: "Default",
+	bucketName: "default",
 }
 
 // WithTTL 配置生命周期

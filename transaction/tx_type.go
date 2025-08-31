@@ -34,7 +34,7 @@ func (tx *Transaction) put(bucketID uint64, key, value []byte, ttl uint32, times
 	}
 
 	kvPair := tx.tm.KvPairPool.Get().(*KvPair)
-	kvPair.TxId, kvPair.Type = tx.id, KvPairPuted
+	kvPair.TxId, kvPair.Type = tx.id, RecordPuted
 	kvPair.BucketID, kvPair.Key, kvPair.Value = bucketID, key, value
 	kvPair.KeySize, kvPair.ValueSize = uint32(len(key)), uint32(len(value))
 	kvPair.Timestamp, kvPair.TTL = timestamp, ttl
@@ -58,9 +58,10 @@ func (tx *Transaction) delete(bucketID uint64, key []byte) error {
 	}
 
 	kvPair := &KvPair{
-		Type: KvPairDeleted,
-		TxId: tx.id,
-		Key:  key,
+		Type:     RecordDeleted,
+		TxId:     tx.id,
+		BucketID: bucketID,
+		Key:      key,
 	}
 
 	tx.pendingWrites[string(key)] = kvPair
@@ -78,9 +79,9 @@ func (tx *Transaction) get(bucketID uint64, key []byte) ([]byte, error) {
 	// 对一个事务而言，可以看见自己所做的“未提交”操作
 	kvPair := tx.pendingWrites[string(key)]
 	if kvPair != nil {
-		if kvPair.Type == KvPairPuted {
+		if kvPair.Type == RecordPuted {
 			return kvPair.Value, nil
-		} else if kvPair.Type == KvPairDeleted {
+		} else if kvPair.Type == RecordDeleted {
 			return nil, ErrKeyNotFound
 		}
 	}
@@ -105,9 +106,9 @@ func (tx *Transaction) getKvPair(bucketID uint64, key []byte) (*KvPair, error) {
 	// 对一个事务而言，可以看见自己所做的“未提交”操作
 	kvPair := tx.pendingWrites[string(key)]
 	if kvPair != nil {
-		if kvPair.Type == KvPairPuted {
+		if kvPair.Type == RecordPuted {
 			return kvPair, nil
-		} else if kvPair.Type == KvPairDeleted {
+		} else if kvPair.Type == RecordDeleted {
 			return nil, ErrKeyNotFound
 		}
 	}
@@ -120,7 +121,8 @@ func (tx *Transaction) getKvPair(bucketID uint64, key []byte) (*KvPair, error) {
 	}
 
 	// 从数据库中查找
-	return tx.tm.db.GetKvPairByPosition(kvPairPos)
+	pos, err := tx.tm.db.GetKvPairByPosition(kvPairPos)
+	return pos, err
 }
 
 func (tx *Transaction) Put(bucketName string, key, value []byte, ttl uint32, timestamp uint64, condition PutCondition) (oldValue []byte, err error) {
@@ -2810,7 +2812,7 @@ func (tx *Transaction) IterateUnordered(bucketID uint64, startKey, endKey []byte
 	KvPairInPendingWrites := make(map[string][]byte)
 	for key, pendingKvPair := range tx.pendingWrites {
 		// 筛选出大于等于目标key且未被删除的键
-		if startKey != nil && bytes.Compare([]byte(key), startKey) >= 0 && pendingKvPair.Type != KvPairDeleted {
+		if startKey != nil && bytes.Compare([]byte(key), startKey) >= 0 && pendingKvPair.Type != RecordDeleted {
 			KvPairInPendingWrites[key] = pendingKvPair.Value
 		}
 	}
@@ -2876,14 +2878,14 @@ func (tx *Transaction) Iterate(iterateType IterateType, bucketID uint64, startKe
 	if iterateType == Ascend {
 		for key, pendingKvPair := range tx.pendingWrites {
 			// 筛选出大于等于目标key且未被删除的键
-			if startKey != nil && bytes.Compare([]byte(key), startKey) >= 0 && pendingKvPair.Type != KvPairDeleted {
+			if startKey != nil && bytes.Compare([]byte(key), startKey) >= 0 && pendingKvPair.Type != RecordDeleted {
 				KvPairInPendingWrites[key] = pendingKvPair.Value
 			}
 		}
 	} else if iterateType == Descend {
 		for key, pendingKvPair := range tx.pendingWrites {
 			// 筛选出大于等于目标key且未被删除的键
-			if startKey != nil && bytes.Compare([]byte(key), startKey) <= 0 && pendingKvPair.Type != KvPairDeleted {
+			if startKey != nil && bytes.Compare([]byte(key), startKey) <= 0 && pendingKvPair.Type != RecordDeleted {
 				KvPairInPendingWrites[key] = pendingKvPair.Value
 			}
 		}

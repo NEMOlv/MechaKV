@@ -57,9 +57,7 @@ func NewExpiryMonitor() *ExpiryMonitor {
 }
 
 func (db *DB) CloseExpiryMonitor() {
-	if db.expiryManager.expiryMonitor.cancel != nil {
-		db.expiryManager.expiryMonitor.cancel()
-	}
+	db.expiryManager.expiryMonitor.cancel()
 	return
 }
 
@@ -82,6 +80,7 @@ func (db *DB) StartExpiryMonitor() {
 			if keys != nil {
 				err := db.checkAndDeleteExpiredKey(bukectIDs, keys, slotNum)
 				if err != nil {
+					println(err)
 					log.Fatal(err)
 					return
 				}
